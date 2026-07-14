@@ -30,6 +30,13 @@ describe('statsCommand', () => {
     expect(lines[1]).toContain('1,000,000');
     expect(lines[1]).toMatch(/15\.\d+/); // ~$15 for 1M opus input tokens
   });
+  it('renders a single (all) totals row with cost when no --by is given', () => {
+    const out = statsCommand({ tag: [] }, new StoreReader(root));
+    const lines = out.split('\n');
+    expect(lines).toHaveLength(2); // header + single (all) row
+    expect(lines[1]).toMatch(/^\(all\)/);
+    expect(lines[1]).toMatch(/15\.\d+/); // ~$15 for 1M opus input tokens
+  });
   it('emits machine-readable json', () => {
     const parsed = JSON.parse(statsCommand({ by: 'agent', tag: [], json: true }, new StoreReader(root)));
     expect(parsed.rows).toHaveLength(2);

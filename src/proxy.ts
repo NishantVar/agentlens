@@ -7,7 +7,7 @@ import type { RawPair } from './types.js';
 export interface ProxyOptions { upstream: string; onPair(pair: Omit<RawPair, 'seq'>): void }
 export interface CaptureProxy { origin: string; close(): Promise<void> }
 
-const REDACT = new Set(['authorization', 'x-api-key', 'cookie']);
+const REDACT = new Set(['authorization', 'x-api-key', 'cookie', 'set-cookie']);
 
 function headerMap(h: http.IncomingHttpHeaders | http.OutgoingHttpHeaders, redact: boolean): Record<string, string> {
   const out: Record<string, string> = {};
@@ -43,19 +43,28 @@ export function startProxy(opts: ProxyOptions): Promise<CaptureProxy> {
         (proxyRes) => {
           res.writeHead(proxyRes.statusCode ?? 502, proxyRes.headers);
           const resChunks: Buffer[] = [];
+          let proxyResEnded = false;
           proxyRes.on('data', (c) => { resChunks.push(c); res.write(c); });
+          proxyRes.on('error', (e) => {
+            console.error('agentlens: upstream response error (fail-open):', e.message);
+          });
           proxyRes.on('end', () => {
+            proxyResEnded = true;
             res.end();
             try {
               opts.onPair({
                 ts,
                 durationMs: Date.now() - started,
                 request: { method: req.method ?? '', path: req.url ?? '', headers: headerMap(req.headers, true), body: reqBody.toString('utf8') },
-                response: { status: proxyRes.statusCode ?? 0, headers: headerMap(proxyRes.headers, false), body: Buffer.concat(resChunks).toString('utf8') },
+                response: { status: proxyRes.statusCode ?? 0, headers: headerMap(proxyRes.headers, true), body: Buffer.concat(resChunks).toString('utf8') },
               });
             } catch (e) {
               console.error('agentlens: onPair failed (fail-open):', e);
             }
+          });
+          // If the client disconnects mid-stream, abort the upstream request.
+          res.on('close', () => {
+            if (!proxyResEnded) proxyReq.destroy();
           });
         },
       );
@@ -63,6 +72,9 @@ export function startProxy(opts: ProxyOptions): Promise<CaptureProxy> {
         console.error('agentlens: upstream error (fail-open):', e.message);
         if (!res.headersSent) res.writeHead(502, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ error: 'agentlens proxy: upstream unreachable' }));
+      });
+      req.on('error', (e) => {
+        console.error('agentlens: client request error (fail-open):', e.message);
       });
       proxyReq.end(reqBody);
     });

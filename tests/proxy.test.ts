@@ -8,20 +8,28 @@ let upstream: http.Server;
 let upstreamOrigin: string;
 let proxy: CaptureProxy;
 const pairs: Omit<RawPair, 'seq'>[] = [];
+let foreverClosed: Promise<void>;
+let resolveForeverClosed: () => void;
 
 beforeAll(async () => {
+  foreverClosed = new Promise<void>((r) => { resolveForeverClosed = r; });
   upstream = http.createServer((req, res) => {
     if (req.url === '/v1/messages') {
       let body = '';
       req.on('data', (c) => (body += c));
       req.on('end', () => {
-        res.writeHead(200, { 'content-type': 'application/json' });
+        res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': 'session=secret' });
         res.end(JSON.stringify({ echoed: JSON.parse(body), sawAcceptEncoding: req.headers['accept-encoding'] ?? null, sawAuth: req.headers.authorization ?? null }));
       });
     } else if (req.url === '/v1/stream') {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       res.write('event: a\ndata: {"x":1}\n\n');
       setTimeout(() => { res.write('event: b\ndata: {"x":2}\n\n'); res.end(); }, 20);
+    } else if (req.url === '/v1/forever') {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      const timer = setInterval(() => res.write('event: tick\ndata: {}\n\n'), 5);
+      res.write('event: start\ndata: {}\n\n');
+      res.on('close', () => { clearInterval(timer); resolveForeverClosed(); });
     } else { res.writeHead(404); res.end(); }
   });
   await new Promise<void>((r) => upstream.listen(0, '127.0.0.1', r));
@@ -42,8 +50,10 @@ describe('startProxy', () => {
     expect(data.echoed).toEqual({ model: 'm1' });
     expect(data.sawAuth).toBe('Bearer sk-secret');   // forwarded intact
     expect(data.sawAcceptEncoding).toBeNull();        // stripped
+    expect(res.headers.get('set-cookie')).toBe('session=secret'); // forwarded intact to client
     expect(pairs).toHaveLength(1);
     expect(pairs[0].request.headers.authorization).toBe('<redacted>');
+    expect(pairs[0].response.headers['set-cookie']).toBe('<redacted>'); // redacted in stored trace
     expect(pairs[0].request.body).toContain('"model":"m1"');
     expect(pairs[0].response.status).toBe(200);
     expect(pairs[0].durationMs).toBeGreaterThanOrEqual(0);
@@ -64,6 +74,23 @@ describe('startProxy', () => {
     const res = await fetch(`${bad.origin}/v1/messages`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
     expect(res.status).toBe(200);
     await bad.close();
+  });
+
+  it('aborts the upstream request when the client disconnects mid-stream', async () => {
+    const controller = new AbortController();
+    const res = await fetch(`${proxy.origin}/v1/forever`, { signal: controller.signal });
+    const reader = res.body!.getReader();
+    await reader.read();        // first chunk arrived → stream is live
+    controller.abort();         // client disconnects mid-stream
+    reader.cancel().catch(() => {});
+    // (b) upstream saw its response closed
+    await foreverClosed;
+    // (a) proxy still serves a subsequent normal request
+    const ok = await fetch(`${proxy.origin}/v1/messages`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'm2' }),
+    });
+    expect(ok.status).toBe(200);
+    expect((await ok.json()).echoed).toEqual({ model: 'm2' });
   });
 
   it('responds 502 on upstream connection failure', async () => {
