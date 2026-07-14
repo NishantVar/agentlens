@@ -16,4 +16,28 @@ program.command('run')
     process.exit(await lensRun({ tags: opts.tag, argv: command }));
   });
 
+const tagOpt = (v: string, p: string[]) => [...p, v];
+
+program.command('stats')
+  .description('Aggregate token/cost stats')
+  .option('--by <key>', 'group by: agent|model|runtime|run|stage|<any tag>')
+  .option('--tag <k=v>', 'filter tag (repeatable)', tagOpt, [] as string[])
+  .option('--since <dur>', 'e.g. 7d, 24h, 30m')
+  .option('--runtime <rt>', 'claude|codex')
+  .option('--json', 'machine-readable output')
+  .action(async (opts) => {
+    const { statsCommand } = await import('./stats.js');
+    process.stdout.write(statsCommand(opts) + '\n');
+  });
+
+program.command('sessions')
+  .description('List captured sessions')
+  .option('--tag <k=v>', 'filter tag (repeatable)', tagOpt, [] as string[])
+  .option('--since <dur>', 'e.g. 7d')
+  .option('--json', 'machine-readable output')
+  .action(async (opts) => {
+    const { sessionsCommand } = await import('./stats.js');
+    process.stdout.write(sessionsCommand(opts) + '\n');
+  });
+
 program.parse();
