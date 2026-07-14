@@ -62,4 +62,13 @@ program.command('report')
     console.log(out);
   });
 
+program.command('dashboard')
+  .description('Live local dashboard')
+  .option('--port <n>', 'port (default 4040)', '4040')
+  .action(async (opts: { port: string }) => {
+    const { startDashboard } = await import('./dashboard.js');
+    const d = await startDashboard(Number(opts.port));
+    console.log(`agentlens dashboard: ${d.origin}`);
+  });
+
 program.parse();
