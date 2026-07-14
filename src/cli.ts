@@ -40,4 +40,26 @@ program.command('sessions')
     process.stdout.write(sessionsCommand(opts) + '\n');
   });
 
+program.command('report')
+  .description('Generate a self-contained HTML trace report')
+  .argument('[sessionIds...]')
+  .option('--tag <k=v>', 'include all sessions matching tag (repeatable)', tagOpt, [] as string[])
+  .option('--out <path>', 'output file')
+  .action(async (sessionIds: string[], opts: { tag: string[]; out?: string }) => {
+    const { generateReport } = await import('./report.js');
+    const { StoreReader } = await import('./store.js');
+    const { filterIndex } = await import('./query.js');
+    const { resolveTags } = await import('./tags.js');
+    const { writeFileSync } = await import('node:fs');
+    const reader = new StoreReader();
+    let ids = sessionIds;
+    if (!ids.length && opts.tag.length) {
+      ids = filterIndex(reader.listIndex(), { tags: resolveTags(opts.tag, undefined) }).map((e) => e.id);
+    }
+    if (!ids.length) { console.error('agentlens: no sessions selected (pass ids or --tag)'); process.exit(2); }
+    const out = opts.out ?? `lens-report-${ids[0]}.html`;
+    writeFileSync(out, generateReport(ids, reader));
+    console.log(out);
+  });
+
 program.parse();
