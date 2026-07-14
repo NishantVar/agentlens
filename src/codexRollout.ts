@@ -1,0 +1,81 @@
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import type { NormalizedEvent } from './types.js';
+
+export interface CollectOpts { sessionsRoot?: string; cwd?: string }
+export interface CollectedSession { rolloutPath: string; events: NormalizedEvent[] }
+
+type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
+const n = (v: unknown): number => (typeof v === 'number' ? v : 0);
+
+function lines(jsonlText: string): Any[] {
+  const out: Any[] = [];
+  for (const line of jsonlText.split('\n')) {
+    if (!line.trim()) continue;
+    try { out.push(JSON.parse(line)); } catch { /* skip */ }
+  }
+  return out;
+}
+
+export function parseRollout(jsonlText: string): NormalizedEvent[] {
+  const events: NormalizedEvent[] = [];
+  let model = 'unknown';
+  for (const d of lines(jsonlText)) {
+    if (d?.type === 'turn_context' && d.payload?.model) model = d.payload.model;
+    if (d?.type === 'event_msg' && d.payload?.type === 'token_count') {
+      const u = d.payload.info?.last_token_usage;
+      if (!u) continue;
+      const cached = n(u.cached_input_tokens);
+      events.push({
+        ts: d.timestamp ?? '', seq: events.length + 1, kind: 'api_call', model,
+        usage: { input: n(u.input_tokens) - cached, output: n(u.output_tokens), cacheRead: cached, cacheWrite: 0, reasoning: n(u.reasoning_output_tokens) },
+        durationMs: 0, status: 200,
+      });
+    }
+  }
+  return events;
+}
+
+export function extractMessages(jsonlText: string): { role: string; text: string }[] {
+  const out: { role: string; text: string }[] = [];
+  for (const d of lines(jsonlText)) {
+    if (d?.type !== 'response_item' || d.payload?.type !== 'message') continue;
+    const content: Any[] = Array.isArray(d.payload.content) ? d.payload.content : [];
+    out.push({ role: String(d.payload.role ?? 'unknown'), text: content.map((c) => (typeof c?.text === 'string' ? c.text : `[${c?.type ?? 'unknown'}]`)).join('\n') });
+  }
+  return out;
+}
+
+function findRollouts(dir: string): string[] {
+  const out: string[] = [];
+  for (const name of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, name.name);
+    if (name.isDirectory()) out.push(...findRollouts(p));
+    else if (name.name.startsWith('rollout-') && name.name.endsWith('.jsonl')) out.push(p);
+  }
+  return out;
+}
+
+export function collectCodexSessions(startedAt: Date, opts: CollectOpts = {}): CollectedSession[] {
+  const root = opts.sessionsRoot ?? process.env.AGENTLENS_CODEX_SESSIONS ?? join(homedir(), '.codex', 'sessions');
+  if (!existsSync(root)) return [];
+  const cutoff = startedAt.getTime() - 2000;
+  const out: CollectedSession[] = [];
+  try {
+    for (const path of findRollouts(root)) {
+      if (statSync(path).mtimeMs < cutoff) continue;
+      const text = readFileSync(path, 'utf8');
+      if (opts.cwd) {
+        const meta = lines(text).find((d) => d?.type === 'session_meta');
+        if (meta?.payload?.cwd !== opts.cwd) continue;
+      }
+      const events = parseRollout(text);
+      if (events.length === 0 && extractMessages(text).length === 0) continue;
+      out.push({ rolloutPath: path, events });
+    }
+  } catch (e) {
+    console.error(`agentlens: codex rollout collection failed (fail-open): ${(e as Error).message}`);
+  }
+  return out;
+}
