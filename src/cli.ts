@@ -18,6 +18,24 @@ program.command('run')
 
 const tagOpt = (v: string, p: string[]) => [...p, v];
 
+program.command('import')
+  .description('Import pre-existing claude/codex session logs into the store')
+  .option('--runtime <rt>', 'claude|codex (default: both)')
+  .option('--since <dur>', 'only sessions started within the window, e.g. 7d')
+  .option('--tag <k=v>', 'tag applied to imported sessions (repeatable)', tagOpt, [] as string[])
+  .option('--json', 'machine-readable output')
+  .action(async (opts: { runtime?: string; since?: string; tag: string[]; json?: boolean }) => {
+    if (opts.runtime && opts.runtime !== 'claude' && opts.runtime !== 'codex') {
+      console.error(`agentlens: unsupported --runtime "${opts.runtime}" — supported: claude, codex`);
+      process.exit(2);
+    }
+    const { runImport } = await import('./import.js');
+    const sum = runImport({ runtime: opts.runtime as 'claude' | 'codex' | undefined, since: opts.since, tag: opts.tag });
+    if (opts.json) { process.stdout.write(JSON.stringify(sum) + '\n'); return; }
+    const errs = sum.errors ? `, ${sum.errors} errors` : '';
+    process.stdout.write(`imported ${sum.imported}, skipped ${sum.skippedExisting} (already present), skipped ${sum.skippedEmpty} (empty)${errs}\n`);
+  });
+
 program.command('stats')
   .description('Aggregate token/cost stats')
   .option('--by <key>', 'group by: agent|model|runtime|run|stage|<any tag>')

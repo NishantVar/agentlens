@@ -39,6 +39,18 @@ Capture is **fail-open**: if the proxy or log collection fails, the agent still
 runs to completion and its exit code is preserved; only the observability data is
 lost, never the run.
 
+### `lens import [--runtime claude|codex] [--since <dur>] [--tag k=v ...] [--json]`
+One-shot, idempotent backfill of sessions that were NOT wrapped by `lens run`:
+claude's native transcripts (`~/.claude/projects/**/*.jsonl`, override with
+`AGENTLENS_CLAUDE_PROJECTS`) and codex's rollouts (`~/.codex/sessions`, override
+with `AGENTLENS_CODEX_SESSIONS`). Sessions are deduped by native session id —
+both against previous imports and against sessions already captured by
+`lens run` — so re-running is safe. `--since` bounds the scan by the log's own
+start time; `--tag` tags every session imported in the batch (`AGENTLENS_TAGS`
+still wins on collision). Timing, cwd, models, and token usage all come from
+the logs themselves. Prints `imported N, skipped M (already present), skipped
+K (empty)`.
+
 ### `lens stats [--by <key>] [--tag k=v ...] [--since <dur>] [--runtime <rt>] [--json]`
 Aggregates token counts and estimated cost.
 - `--by <key>` — group rows by `agent`, `model`, `runtime`, `run`, `stage`, or any
@@ -86,13 +98,14 @@ All sessions land in one global store, independent of the directory you run from
 
 ```
 ~/.agent-obs/                 (override with AGENTLENS_HOME)
-├── index.jsonl               one line per finalized session (the query index)
+├── index.jsonl               one line per finalized session (the query index; carries nativeSessionIds for import dedup)
 ├── pricing.json              optional pricing overrides (see below)
 └── sessions/<id>/
     ├── meta.json             runtime, capture mode, tags, cwd, argv, timing
     ├── events.jsonl          normalized per-call token usage
     ├── raw.jsonl             full request/response pairs (proxy mode)
-    └── rollout-N.jsonl       copied native rollout(s) (logs mode / codex)
+    ├── rollout-N.jsonl       copied native rollout(s) (logs mode / codex)
+    └── transcript.jsonl      copied native claude transcript (imported sessions)
 ```
 
 - `AGENTLENS_HOME` overrides the store root (used for tests and isolated runs).
