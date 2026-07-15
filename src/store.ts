@@ -43,9 +43,10 @@ export class SessionWriter {
   appendEvent(ev: NormalizedEvent): void {
     appendFileSync(join(this.dir, 'events.jsonl'), JSON.stringify(ev) + '\n');
   }
-  finalize(exitCode: number): IndexEntry {
-    const endedAt = new Date().toISOString();
-    this.meta = { ...this.meta, endedAt, exitCode };
+  finalize(exitCode: number, extra?: { endedAt?: string; nativeSessionIds?: string[] }): IndexEntry {
+    const endedAt = extra?.endedAt ?? new Date().toISOString();
+    const nativeSessionIds = extra?.nativeSessionIds ?? this.meta.nativeSessionIds;
+    this.meta = { ...this.meta, endedAt, exitCode, nativeSessionIds };
     writeFileSync(join(this.dir, 'meta.json'), JSON.stringify(this.meta, null, 2));
     const events = readJsonl<NormalizedEvent>(join(this.dir, 'events.jsonl'));
     let totals = emptyUsage();
@@ -55,6 +56,7 @@ export class SessionWriter {
       id: this.id, runtime: this.meta.runtime, tags: this.meta.tags,
       models: [...models], startedAt: this.meta.startedAt, endedAt, exitCode,
       totals: { ...totals, requests: events.length },
+      nativeSessionIds,
     };
     appendFileSync(join(this.root, 'index.jsonl'), JSON.stringify(entry) + '\n');
     return entry;

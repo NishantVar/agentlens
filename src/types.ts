@@ -25,6 +25,8 @@ export interface SessionMeta {
   startedAt: string;     // ISO 8601
   endedAt?: string;
   exitCode?: number;
+  nativeSessionIds?: string[];  // native ids of the underlying CLI session(s)
+  source?: { kind: 'import'; path: string };
 }
 
 export interface RawPair {
@@ -56,4 +58,5 @@ export interface IndexEntry {
   endedAt: string;
   exitCode: number;
   totals: SessionTotals;
+  nativeSessionIds?: string[];
 }

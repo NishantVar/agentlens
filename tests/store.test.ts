@@ -64,3 +64,22 @@ describe('newSessionId', () => {
     expect(a).not.toBe(b);
   });
 });
+
+describe('SessionWriter.finalize with extra fields', () => {
+  it('finalize honors extra endedAt and nativeSessionIds and indexes them', () => {
+    const meta: SessionMeta = {
+      id: 'imp-1', runtime: 'claude', capture: 'logs', tags: {}, cwd: '/repo', argv: [],
+      lensVersion: '0.1.0', startedAt: '2026-07-01T10:00:00.000Z',
+      source: { kind: 'import', path: '/src/t.jsonl' },
+    };
+    const w = new SessionWriter(root, meta);
+    w.appendEvent({ ts: '2026-07-01T10:00:05.000Z', seq: 1, kind: 'api_call', model: 'm', usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, reasoning: 0 }, durationMs: 0, status: 200 });
+    const entry = w.finalize(0, { endedAt: '2026-07-01T10:01:00.000Z', nativeSessionIds: ['native-a'] });
+    expect(entry.endedAt).toBe('2026-07-01T10:01:00.000Z');
+    expect(entry.nativeSessionIds).toEqual(['native-a']);
+    const reader = new StoreReader(root);
+    expect(reader.listIndex().at(-1)?.nativeSessionIds).toEqual(['native-a']);
+    expect(reader.readMeta('imp-1').source).toEqual({ kind: 'import', path: '/src/t.jsonl' });
+    expect(reader.readMeta('imp-1').endedAt).toBe('2026-07-01T10:01:00.000Z');
+  });
+});
