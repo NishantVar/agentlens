@@ -14,3 +14,8 @@ export const CLAUDE_RAW_BODY = JSON.stringify({
   model: 'claude-opus-4-8', messages: [],
   metadata: { user_id: 'user_abc_account_def_session_11111111-1111-1111-1111-111111111111' },
 });
+
+export const CLAUDE_RAW_BODY_JSON_UID = JSON.stringify({
+  model: 'claude-opus-4-8', messages: [],
+  metadata: { user_id: JSON.stringify({ device_id: 'd1', account_uuid: 'a1', session_id: '33333333-3333-3333-3333-333333333333' }) },
+});

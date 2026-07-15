@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { extractClaudeSessionIdFromRawBody, findClaudeTranscripts, parseClaudeTranscript } from '../src/claudeTranscript.js';
-import { claudeNoiseFixture, claudeTranscriptFixture, CLAUDE_RAW_BODY } from './fixtures/claudeTranscript.js';
+import { claudeNoiseFixture, claudeTranscriptFixture, CLAUDE_RAW_BODY, CLAUDE_RAW_BODY_JSON_UID } from './fixtures/claudeTranscript.js';
 
 const SID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 
@@ -29,6 +29,9 @@ describe('parseClaudeTranscript', () => {
 describe('extractClaudeSessionIdFromRawBody', () => {
   it('pulls the session uuid out of metadata.user_id', () => {
     expect(extractClaudeSessionIdFromRawBody(CLAUDE_RAW_BODY)).toBe('11111111-1111-1111-1111-111111111111');
+  });
+  it('pulls the session uuid out of the current JSON-encoded user_id format', () => {
+    expect(extractClaudeSessionIdFromRawBody(CLAUDE_RAW_BODY_JSON_UID)).toBe('33333333-3333-3333-3333-333333333333');
   });
   it('returns undefined when absent', () => {
     expect(extractClaudeSessionIdFromRawBody('{"model":"m"}')).toBeUndefined();

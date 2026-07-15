@@ -42,10 +42,13 @@ export function parseClaudeTranscript(jsonlText: string): ParsedTranscript {
   return { sessionId, cwd, startedAt, endedAt, events };
 }
 
-// Claude Code sends metadata.user_id ending in "_session_<uuid>" on every
-// /v1/messages request; recover it from a recorded raw request body.
+// Claude Code carries the session id in metadata.user_id on every /v1/messages
+// request; recover it from a recorded raw request body. Handles both the legacy
+// "_session_<uuid>" suffix form and the current JSON-encoded {"session_id":"<uuid>"}
+// form (where user_id is itself a JSON string, so quotes appear backslash-escaped).
 export function extractClaudeSessionIdFromRawBody(requestBody: string): string | undefined {
-  const m = /"user_id"\s*:\s*"[^"]*_session_([0-9a-f-]{36})"/.exec(requestBody);
+  const m = /_session_([0-9a-f-]{36})/.exec(requestBody)
+    ?? /session_id\\?"\s*:\s*\\?"([0-9a-f-]{36})/.exec(requestBody);
   return m?.[1];
 }
 
