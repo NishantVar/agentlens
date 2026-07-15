@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { collectCodexSessions, extractMessages, parseRollout } from '../src/codexRollout.js';
+import { collectCodexSessions, extractMessages, parseRollout, listCodexRollouts, rolloutNativeSessionId } from '../src/codexRollout.js';
 import { rolloutFixture } from './fixtures/codexRollout.js';
 
 describe('parseRollout', () => {
@@ -48,5 +48,34 @@ describe('collectCodexSessions', () => {
   });
   it('returns [] for a missing root (fail-open)', () => {
     expect(collectCodexSessions(new Date(), { sessionsRoot: '/nope/nothing' })).toEqual([]);
+  });
+});
+
+describe('listCodexRollouts / rolloutNativeSessionId', () => {
+  it('lists all rollouts with native id, cwd and time bounds (no window filter)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'codex-sessions-'));
+    mkdirSync(join(root, '2026', '07'), { recursive: true });
+    writeFileSync(join(root, '2026', '07', 'rollout-old.jsonl'), rolloutFixture('/repo'));
+    const [r] = listCodexRollouts({ sessionsRoot: root });
+    expect(r.nativeSessionId).toBe('019f-test');
+    expect(r.cwd).toBe('/repo');
+    expect(r.startedAt).toBe('2026-07-14T18:07:23.308Z');
+    expect(r.endedAt).toBe('2026-07-14T18:07:32.000Z');
+    expect(r.events).toHaveLength(1);
+    expect(listCodexRollouts({ sessionsRoot: join(root, 'nope') })).toEqual([]);
+  });
+  it('rolloutNativeSessionId reads session_meta payload id', () => {
+    expect(rolloutNativeSessionId(rolloutFixture('/repo'))).toBe('019f-test');
+    expect(rolloutNativeSessionId('not json\n')).toBeUndefined();
+  });
+});
+
+describe('collectCodexSessions native id', () => {
+  it('includes nativeSessionId on collected sessions', () => {
+    const root = mkdtempSync(join(tmpdir(), 'codex-sessions-'));
+    mkdirSync(join(root, 'd'), { recursive: true });
+    writeFileSync(join(root, 'd', 'rollout-x.jsonl'), rolloutFixture('/repo'));
+    const [s] = collectCodexSessions(new Date(Date.now() - 60_000), { sessionsRoot: root });
+    expect(s.nativeSessionId).toBe('019f-test');
   });
 });

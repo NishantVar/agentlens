@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import type { NormalizedEvent } from './types.js';
 
 export interface CollectOpts { sessionsRoot?: string; cwd?: string }
-export interface CollectedSession { rolloutPath: string; events: NormalizedEvent[] }
+export interface CollectedSession { rolloutPath: string; events: NormalizedEvent[]; nativeSessionId?: string }
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 const n = (v: unknown): number => (typeof v === 'number' ? v : 0);
@@ -57,6 +57,38 @@ function findRollouts(dir: string): string[] {
   return out;
 }
 
+export function rolloutNativeSessionId(jsonlText: string): string | undefined {
+  const meta = lines(jsonlText).find((d) => d?.type === 'session_meta');
+  return typeof meta?.payload?.id === 'string' ? meta.payload.id : undefined;
+}
+
+export interface RolloutInfo { rolloutPath: string; nativeSessionId?: string; cwd?: string; startedAt?: string; endedAt?: string; events: NormalizedEvent[] }
+
+export function listCodexRollouts(opts: { sessionsRoot?: string } = {}): RolloutInfo[] {
+  const root = opts.sessionsRoot ?? process.env.AGENTLENS_CODEX_SESSIONS ?? join(homedir(), '.codex', 'sessions');
+  if (!existsSync(root)) return [];
+  const out: RolloutInfo[] = [];
+  for (const path of findRollouts(root)) {
+    try {
+      const text = readFileSync(path, 'utf8');
+      const ls = lines(text);
+      const meta = ls.find((d) => d?.type === 'session_meta');
+      const last = ls.at(-1);
+      out.push({
+        rolloutPath: path,
+        nativeSessionId: typeof meta?.payload?.id === 'string' ? meta.payload.id : undefined,
+        cwd: typeof meta?.payload?.cwd === 'string' ? meta.payload.cwd : undefined,
+        startedAt: typeof (meta?.payload?.timestamp ?? meta?.timestamp) === 'string' ? (meta?.payload?.timestamp ?? meta?.timestamp) : undefined,
+        endedAt: typeof last?.timestamp === 'string' ? last.timestamp : undefined,
+        events: parseRollout(text),
+      });
+    } catch (e) {
+      console.error(`agentlens: skipping unreadable rollout ${path}: ${(e as Error).message}`);
+    }
+  }
+  return out;
+}
+
 export function collectCodexSessions(startedAt: Date, opts: CollectOpts = {}): CollectedSession[] {
   const root = opts.sessionsRoot ?? process.env.AGENTLENS_CODEX_SESSIONS ?? join(homedir(), '.codex', 'sessions');
   if (!existsSync(root)) return [];
@@ -66,13 +98,12 @@ export function collectCodexSessions(startedAt: Date, opts: CollectOpts = {}): C
     for (const path of findRollouts(root)) {
       if (statSync(path).mtimeMs < cutoff) continue;
       const text = readFileSync(path, 'utf8');
-      if (opts.cwd) {
-        const meta = lines(text).find((d) => d?.type === 'session_meta');
-        if (meta?.payload?.cwd !== opts.cwd) continue;
-      }
+      const parsed = lines(text);
+      const meta = parsed.find((d) => d?.type === 'session_meta');
+      if (opts.cwd && meta?.payload?.cwd !== opts.cwd) continue;
       const events = parseRollout(text);
       if (events.length === 0 && extractMessages(text).length === 0) continue;
-      out.push({ rolloutPath: path, events });
+      out.push({ rolloutPath: path, events, nativeSessionId: typeof meta?.payload?.id === 'string' ? meta.payload.id : undefined });
     }
   } catch (e) {
     console.error(`agentlens: codex rollout collection failed (fail-open): ${(e as Error).message}`);
