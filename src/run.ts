@@ -5,6 +5,7 @@ import { startProxy, type CaptureProxy } from './proxy.js';
 import { SessionWriter, newSessionId, storeRoot } from './store.js';
 import { detectRuntime, getAdapter, type RuntimeAdapter } from './runtimes.js';
 import { resolveTags } from './tags.js';
+import { extractClaudeSessionIdFromRawBody } from './claudeTranscript.js';
 import type { NormalizedEvent, RawPair, Runtime } from './types.js';
 
 const LENS_VERSION = '0.1.0';
@@ -27,6 +28,7 @@ export function lensRun(opts: RunOptions): Promise<number> {
     let writer: SessionWriter | null = null;
     let proxy: CaptureProxy | null = null;
     let seq = 0;
+    const nativeIds = new Set<string>();
     let requests = 0; let tin = 0; let tout = 0;
 
     const recordEvent = (ev: NormalizedEvent) => {
@@ -49,6 +51,8 @@ export function lensRun(opts: RunOptions): Promise<number> {
         onPair: (p) => {
           const pair: RawPair = { ...p, seq: ++seq };
           writer!.appendRaw(pair);
+          const nid = extractClaudeSessionIdFromRawBody(pair.request.body);
+          if (nid) nativeIds.add(nid);
           const call = proxyAdapter.normalize(pair);
           if (call) recordEvent({ ts: pair.ts, seq: pair.seq, kind: 'api_call', model: call.model, usage: call.usage, durationMs: pair.durationMs, status: pair.response.status });
           else requests++; // raw-only pair still counts as a request
@@ -64,6 +68,7 @@ export function lensRun(opts: RunOptions): Promise<number> {
         let i = 0;
         for (const s of adapter.collect(startedAt, { cwd: process.cwd() })) {
           i++;
+          if (s.nativeSessionId) nativeIds.add(s.nativeSessionId);
           for (const ev of s.events) recordEvent({ ...ev, seq: ++seq });
           try {
             copyFileSync(s.rolloutPath, join(root, 'sessions', logsWriter.id, `rollout-${i}.jsonl`));
@@ -80,7 +85,7 @@ export function lensRun(opts: RunOptions): Promise<number> {
       try {
         collectLogs();
         if (writer) {
-          const entry = writer.finalize(code);
+          const entry = writer.finalize(code, { nativeSessionIds: nativeIds.size ? [...nativeIds] : undefined });
           console.error(`agentlens: session ${entry.id} — ${requests} requests, ${tin} in / ${tout} out tokens`);
         }
         if (proxy) await proxy.close();

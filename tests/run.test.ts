@@ -23,7 +23,7 @@ const binDir = mkdtempSync(join(tmpdir(), 'fakebin-'));
 writeFileSync(join(binDir, 'claude'), `#!/usr/bin/env node
 (async () => {
   const base = process.env.ANTHROPIC_BASE_URL;
-  const res = await fetch(base + '/v1/messages', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'claude-opus-4-1', messages: [] }) });
+  const res = await fetch(base + '/v1/messages', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'claude-opus-4-1', messages: [], metadata: { user_id: 'user_abc_account_def_session_22222222-2222-2222-2222-222222222222' } }) });
   await res.text();
   process.exit(Number(process.env.FAKE_EXIT ?? 0));
 })();
@@ -60,6 +60,7 @@ describe('lensRun', () => {
     const raw = r.readRaw(entry.id);
     expect(raw[0].request.path).toBe('/v1/messages');
     expect(raw[0].seq).toBe(1);
+    expect(entry.nativeSessionIds).toEqual(['22222222-2222-2222-2222-222222222222']);
   });
 
   it('propagates the child exit code', async () => {
@@ -87,5 +88,6 @@ describe('lensRun', () => {
     expect(entry.totals).toMatchObject({ input: 4812, output: 256, cacheRead: 17152, requests: 1 });
     expect(r.readMeta(entry.id).capture).toBe('logs');
     expect(existsSync(join(home, 'sessions', entry.id, 'rollout-1.jsonl'))).toBe(true);
+    expect(entry.nativeSessionIds).toEqual(['019f-test']);
   });
 });
