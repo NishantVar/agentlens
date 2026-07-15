@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { generateReport } from '../src/report.js';
 import { SessionWriter, StoreReader } from '../src/store.js';
 import type { SessionMeta } from '../src/types.js';
+import { claudeTranscriptFixture } from './fixtures/claudeTranscript.js';
 
 let root: string; let id: string;
 beforeEach(() => {
@@ -52,5 +53,17 @@ describe('generateReport', () => {
     const html = generateReport([cid], new StoreReader(root));
     expect(html).toContain('hello codex');
     expect(html).toContain('"role":"user"');
+  });
+
+  it('embeds transcript messages for imported claude sessions', () => {
+    const cid = 'imported-claude-session';
+    const meta: SessionMeta = { id: cid, runtime: 'claude', capture: 'logs', tags: {}, cwd: '/', argv: ['claude'], lensVersion: '0', startedAt: '2026-07-14T10:00:00.000Z' };
+    const w = new SessionWriter(root, meta);
+    w.appendEvent({ ts: '2026-07-14T10:00:01.000Z', seq: 1, kind: 'api_call', model: 'claude-opus-4-8', usage: { input: 100, output: 10, cacheRead: 200, cacheWrite: 50, reasoning: 0 }, durationMs: 0, status: 200 });
+    w.finalize(0);
+    writeFileSync(join(root, 'sessions', cid, 'transcript.jsonl'), claudeTranscriptFixture(cid));
+    const html = generateReport([cid], new StoreReader(root));
+    expect(html).toContain('Hello!');
+    expect(html).toContain('conversation (');
   });
 });

@@ -49,7 +49,10 @@ export function extractMessages(jsonlText: string): { role: string; text: string
 
 function findRollouts(dir: string): string[] {
   const out: string[] = [];
-  for (const name of readdirSync(dir, { withFileTypes: true })) {
+  let entries;
+  try { entries = readdirSync(dir, { withFileTypes: true }); }
+  catch (e) { console.error(`agentlens: skipping unreadable dir ${dir}: ${(e as Error).message}`); return out; }
+  for (const name of entries) {
     const p = join(dir, name.name);
     if (name.isDirectory()) out.push(...findRollouts(p));
     else if (name.name.startsWith('rollout-') && name.name.endsWith('.jsonl')) out.push(p);

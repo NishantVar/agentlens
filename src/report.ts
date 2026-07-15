@@ -2,6 +2,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { StoreReader, storeRoot } from './store.js';
 import { extractMessages } from './codexRollout.js';
+import { extractClaudeMessages } from './claudeTranscript.js';
 
 export function generateReport(sessionIds: string[], reader: StoreReader = new StoreReader()): string {
   const sessions = sessionIds.map((id) => {
@@ -10,7 +11,9 @@ export function generateReport(sessionIds: string[], reader: StoreReader = new S
     const messages = readdirSync(dir)
       .filter((f) => f.startsWith('rollout-') && f.endsWith('.jsonl'))
       .sort()
-      .flatMap((f) => extractMessages(readFileSync(join(dir, f), 'utf8')));
+      .flatMap((f) => extractMessages(readFileSync(join(dir, f), 'utf8')))
+      .concat(existsSync(join(dir, 'transcript.jsonl'))
+        ? extractClaudeMessages(readFileSync(join(dir, 'transcript.jsonl'), 'utf8')) : []);
     return { meta: reader.readMeta(id), events: reader.readEvents(id), raw: reader.readRaw(id), messages };
   });
   const json = JSON.stringify({ sessions }).replaceAll('</', '<\\/');

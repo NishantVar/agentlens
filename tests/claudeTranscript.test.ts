@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { extractClaudeSessionIdFromRawBody, findClaudeTranscripts, parseClaudeTranscript } from '../src/claudeTranscript.js';
+import { extractClaudeMessages, extractClaudeSessionIdFromRawBody, findClaudeTranscripts, parseClaudeTranscript } from '../src/claudeTranscript.js';
 import { claudeNoiseFixture, claudeTranscriptFixture, CLAUDE_RAW_BODY, CLAUDE_RAW_BODY_JSON_UID } from './fixtures/claudeTranscript.js';
 
 const SID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
@@ -39,6 +39,16 @@ describe('extractClaudeSessionIdFromRawBody', () => {
   });
 });
 
+describe('extractClaudeMessages', () => {
+  it('extracts role/text, merging streamed assistant chunks that share a requestId', () => {
+    expect(extractClaudeMessages(claudeTranscriptFixture(SID))).toEqual([
+      { role: 'user', text: 'hi' },
+      { role: 'assistant', text: 'Hello!\nMore.' },
+      { role: 'assistant', text: '[tool_use: Bash]' },
+    ]);
+  });
+});
+
 describe('findClaudeTranscripts', () => {
   it('walks project subdirs for .jsonl files and tolerates a missing root', () => {
     const root = mkdtempSync(join(tmpdir(), 'claude-projects-'));
@@ -46,5 +56,18 @@ describe('findClaudeTranscripts', () => {
     writeFileSync(join(root, '-Users-x-repo', `${SID}.jsonl`), claudeTranscriptFixture(SID));
     expect(findClaudeTranscripts(root)).toEqual([join(root, '-Users-x-repo', `${SID}.jsonl`)]);
     expect(findClaudeTranscripts(join(root, 'does-not-exist'))).toEqual([]);
+  });
+  it('is fail-open: skips an unreadable subdir and returns the rest', () => {
+    const root = mkdtempSync(join(tmpdir(), 'claude-projects-'));
+    mkdirSync(join(root, 'ok'));
+    writeFileSync(join(root, 'ok', `${SID}.jsonl`), claudeTranscriptFixture(SID));
+    const bad = join(root, 'bad');
+    mkdirSync(bad);
+    chmodSync(bad, 0o000);
+    try {
+      expect(findClaudeTranscripts(root)).toEqual([join(root, 'ok', `${SID}.jsonl`)]);
+    } finally {
+      chmodSync(bad, 0o700);
+    }
   });
 });

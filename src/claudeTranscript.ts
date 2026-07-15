@@ -42,6 +42,23 @@ export function parseClaudeTranscript(jsonlText: string): ParsedTranscript {
   return { sessionId, cwd, startedAt, endedAt, events };
 }
 
+export function extractClaudeMessages(jsonlText: string): { role: string; text: string }[] {
+  const out: { role: string; text: string; reqId?: string }[] = [];
+  for (const d of lines(jsonlText)) {
+    if ((d?.type !== 'user' && d?.type !== 'assistant') || !d.message) continue;
+    const c = d.message.content;
+    const text = typeof c === 'string' ? c
+      : Array.isArray(c) ? c.map((b: Any) => (typeof b?.text === 'string' ? b.text : `[${b?.type ?? 'unknown'}${b?.name ? ': ' + b.name : ''}]`)).join('\n')
+      : '';
+    if (!text.trim()) continue;
+    const reqId = typeof d.requestId === 'string' ? d.requestId : undefined;
+    const last = out.at(-1);
+    if (d.type === 'assistant' && reqId && last && last.reqId === reqId) { last.text += '\n' + text; continue; }
+    out.push({ role: String(d.message.role ?? d.type), text, reqId });
+  }
+  return out.map(({ role, text }) => ({ role, text }));
+}
+
 // Claude Code carries the session id in metadata.user_id on every /v1/messages
 // request; recover it from a recorded raw request body. Handles both the legacy
 // "_session_<uuid>" suffix form and the current JSON-encoded {"session_id":"<uuid>"}
@@ -60,7 +77,10 @@ export function findClaudeTranscripts(root: string = claudeProjectsRoot()): stri
   if (!existsSync(root)) return [];
   const out: string[] = [];
   const walk = (dir: string) => {
-    for (const e of readdirSync(dir, { withFileTypes: true })) {
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); }
+    catch (e) { console.error(`agentlens: skipping unreadable dir ${dir}: ${(e as Error).message}`); return; }
+    for (const e of entries) {
       const p = join(dir, e.name);
       if (e.isDirectory()) walk(p);
       else if (e.name.endsWith('.jsonl')) out.push(p);
