@@ -1,59 +1,91 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { StoreReader } from './store.js';
-import { filterIndex, groupBy } from './query.js';
+import { filterIndex, groupBy, parseSince } from './query.js';
+import { costUsd, loadPricing, priceFor, type ModelPrice } from './pricing.js';
+import { addUsage, emptyUsage } from './types.js';
+import type { SessionTotals } from './types.js';
+import { PAGE } from './dashboardPage.js';
 
 export interface DashboardHandle { origin: string; close(): Promise<void> }
 
-const PAGE = `<!doctype html>
-<html><head><meta charset="utf-8"><title>agentlens dashboard</title>
-<style>
-  body{font:14px/1.5 -apple-system,system-ui,sans-serif;margin:2rem;max-width:70rem}
-  table{border-collapse:collapse;margin:.5rem 0 1.5rem}td,th{border:1px solid #ccc;padding:.3em .7em;text-align:right}
-  td:first-child,th:first-child{text-align:left}
-  .live{color:#0a0}
-  @media(prefers-color-scheme:dark){body{background:#111;color:#ddd}td,th{border-color:#333}}
-</style></head><body>
-<h1>agentlens</h1>
-<p>filter run: <input id="run" placeholder="flux run id"></p>
-<h2>active sessions</h2><div id="active">–</div>
-<h2>by agent</h2><div id="agents">–</div>
-<h2>recent sessions</h2><div id="recent">–</div>
-<script>
-const fmt = (n) => Number(n ?? 0).toLocaleString();
-const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const table = (headers, rows) => '<table><tr>' + headers.map((h) => '<th>' + esc(h) + '</th>').join('') + '</tr>' +
-  rows.map((r) => '<tr>' + r.map((c) => '<td>' + c + '</td>').join('') + '</tr>').join('') + '</table>';
-async function tick() {
-  const run = document.getElementById('run').value.trim();
-  const data = await (await fetch('/api/data' + (run ? '?run=' + encodeURIComponent(run) : ''))).json();
-  document.getElementById('active').innerHTML = data.active.length
-    ? table(['id', 'agent', 'started'], data.active.map((m) => ['<span class="live">●</span> ' + esc(m.id), esc(m.tags.agent ?? '-'), esc(m.startedAt)]))
-    : '<p>none</p>';
-  document.getElementById('agents').innerHTML = table(
-    ['agent', 'sessions', 'requests', 'input', 'output', 'cache rd', 'cache wr'],
-    data.byAgent.map((r) => [esc(r.key), r.sessions, r.totals.requests, fmt(r.totals.input), fmt(r.totals.output), fmt(r.totals.cacheRead), fmt(r.totals.cacheWrite)]));
-  document.getElementById('recent').innerHTML = table(
-    ['id', 'agent', 'tokens', 'exit'],
-    data.recent.map((e) => [esc(e.id), esc(e.tags.agent ?? '-'), fmt(e.totals.input + e.totals.output + e.totals.cacheRead + e.totals.cacheWrite), e.exitCode]));
+interface ModelSlice { totals: SessionTotals; cost: number }
+interface SessionBreakdown { cost: number; unpriced: number; perModel: Map<string, ModelSlice> }
+
+function breakdown(id: string, reader: StoreReader, pricing: Record<string, ModelPrice>): SessionBreakdown {
+  const perModel = new Map<string, ModelSlice>();
+  let cost = 0; let unpriced = 0;
+  for (const ev of reader.readEvents(id)) {
+    const slice = perModel.get(ev.model) ?? { totals: { ...emptyUsage(), requests: 0 }, cost: 0 };
+    slice.totals = { ...addUsage(slice.totals, ev.usage), requests: slice.totals.requests + 1 };
+    const p = priceFor(ev.model, pricing);
+    if (p) { const c = costUsd(ev.usage, p); slice.cost += c; cost += c; } else { unpriced++; }
+    perModel.set(ev.model, slice);
+  }
+  return { cost, unpriced, perModel };
 }
-tick(); setInterval(tick, 2000);
-</script></body></html>`;
 
 export function startDashboard(port = 4040, reader: StoreReader = new StoreReader()): Promise<DashboardHandle> {
+  const pricing = loadPricing();
+  // Finalized sessions are immutable, so their cost breakdown is memoized across polls.
+  const memo = new Map<string, SessionBreakdown>();
+  const forSession = (id: string): SessionBreakdown => {
+    let b = memo.get(id);
+    if (!b) { b = breakdown(id, reader, pricing); memo.set(id, b); }
+    return b;
+  };
+
   const server = http.createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://x');
     if (url.pathname === '/api/data') {
-      const run = url.searchParams.get('run') ?? undefined;
-      const filter = run ? { tags: { run } } : {};
-      const index = filterIndex(reader.listIndex(), filter);
-      const active = reader.listActive().filter((m) => !run || m.tags.run === run);
-      const byAgent = groupBy(index, 'agent', reader);
-      const recent = [...index].sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, 20);
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ active, byAgent, recent }));
+      try {
+        const run = url.searchParams.get('run') ?? undefined;
+        let since: Date | undefined;
+        try { since = parseSince(url.searchParams.get('since') ?? ''); } catch { since = undefined; }
+        const filter = { tags: run ? { run } : undefined, since };
+        const index = filterIndex(reader.listIndex(), filter);
+        const active = reader.listActive().filter((m) => !run || m.tags.run === run);
+
+        const summaryTotals = { ...emptyUsage(), requests: 0 };
+        let summaryCost = 0; let unpricedEvents = 0;
+        const agentCost = new Map<string, number>();
+        const modelRows = new Map<string, { sessions: number; totals: SessionTotals; costUsd: number }>();
+        for (const e of index) {
+          const b = forSession(e.id);
+          summaryCost += b.cost; unpricedEvents += b.unpriced;
+          Object.assign(summaryTotals, { ...addUsage(summaryTotals, e.totals), requests: summaryTotals.requests + e.totals.requests });
+          const agentKey = e.tags.agent ?? '(untagged)';
+          agentCost.set(agentKey, (agentCost.get(agentKey) ?? 0) + b.cost);
+          for (const [model, slice] of b.perModel) {
+            const row = modelRows.get(model) ?? { sessions: 0, totals: { ...emptyUsage(), requests: 0 }, costUsd: 0 };
+            row.sessions += 1;
+            row.totals = { ...addUsage(row.totals, slice.totals), requests: row.totals.requests + slice.totals.requests };
+            row.costUsd += slice.cost;
+            modelRows.set(model, row);
+          }
+        }
+
+        const weight = (t: SessionTotals) => t.input + t.output + t.cacheRead + t.cacheWrite;
+        const byAgent = groupBy(index, 'agent', reader).map((r) => ({ ...r, costUsd: agentCost.get(r.key) ?? 0 }));
+        const byModel = [...modelRows.entries()]
+          .map(([key, r]) => ({ key, ...r }))
+          .sort((a, b) => weight(b.totals) - weight(a.totals));
+        const recent = [...index]
+          .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+          .slice(0, 50)
+          .map((e) => ({ ...e, costUsd: forSession(e.id).cost }));
+        const summary = {
+          sessions: index.length, active: active.length,
+          totals: summaryTotals, costUsd: summaryCost, unpricedEvents,
+        };
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ generatedAt: new Date().toISOString(), summary, active, byAgent, byModel, recent }));
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: (e as Error).message }));
+      }
     } else if (url.pathname === '/') {
-      res.writeHead(200, { 'content-type': 'text/html' });
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       res.end(PAGE);
     } else {
       res.writeHead(404); res.end();

@@ -74,9 +74,12 @@ ids or by `--tag` (all matching sessions). `--out` sets the output path (default
 to `lens-report-<id>.html`). Open the file in any browser — no server needed.
 
 ### `lens dashboard [--port <n>]`
-Starts a live local dashboard (default `http://127.0.0.1:4040`) showing active
-sessions, per-agent totals, and recent runs. `--port` changes the port. It serves
-`/` (HTML) and `/api/data` (JSON) reading the same store live.
+Starts a live local dashboard (default `http://127.0.0.1:4040`): a token trace
+over time, sessions in flight, window totals with estimated cost, and per-agent /
+per-model / recent-session breakdowns. Filterable by time window (1h/24h/7d/all)
+and `run` tag; polls every 2s. `--port` changes the port. It serves `/` (HTML,
+self-contained, no external assets) and `/api/data` (JSON) reading the same
+store live.
 
 ## Tags and attribution
 
