@@ -16,6 +16,7 @@ Wire-level observability for coding agents. **Usage** (commands, tags, store, pr
 - Claude is proxy-mode via `ANTHROPIC_BASE_URL` (subscription OAuth passes through a localhost reverse proxy; `accept-encoding` is stripped so bodies stay parseable).
 - Backward compat of the store: JSONL is append-only; readers skip corrupt lines. Don't change `NormalizedEvent`/`IndexEntry` shapes without a migration story.
 - Recorded traces redact `authorization`, `x-api-key`, `cookie`, `set-cookie`. Keep it that way; traces contain full prompts and the store is chmod 700.
+- **Captured data never leaves this machine.** The store (`~/.agent-obs` or any `AGENTLENS_HOME`), generated `lens-report*.html` files, and anything derived from real sessions contain full prompts/responses. Never commit them, never push them, never upload them anywhere — no exceptions, regardless of task. This repo is headed for open source: only source, docs, and synthetic fixtures may be committed. Before any commit, verify nothing data-derived is staged. Never add a git remote or publish this repo unless the user explicitly directs it in the current conversation.
 
 ## Attribution semantics (load-bearing)
 

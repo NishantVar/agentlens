@@ -1,2 +1,7 @@
 node_modules/
 dist/
+
+# local captured data — never commit (see AGENTS.md hard invariants)
+.agent-obs/
+lens-report*.html
+*.local.jsonl
