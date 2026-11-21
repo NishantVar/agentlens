@@ -73,6 +73,15 @@ request/response bodies for the selected sessions. Select sessions by explicit
 ids or by `--tag` (all matching sessions). `--out` sets the output path (defaults
 to `lens-report-<id>.html`). Open the file in any browser — no server needed.
 
+### `lens compact`
+Shrinks the store in place. Agent request bodies repeat the full tool list,
+system prompt, and conversation history on every call; new captures already
+store each distinct piece once per session (in the session's `blobs.jsonl`),
+and `compact` rewrites older sessions the same way. Every line is verified to
+read back byte-identical before a file is replaced. Sessions that are still
+running (unfinalized and written to within the last hour) are skipped. Safe to
+re-run.
+
 ### `lens dashboard [--port <n>]`
 Starts a live local dashboard (default `http://127.0.0.1:4040`): a token trace
 over time, sessions in flight, window totals with estimated cost, and per-agent /
@@ -106,7 +115,8 @@ All sessions land in one global store, independent of the directory you run from
 └── sessions/<id>/
     ├── meta.json             runtime, capture mode, tags, cwd, argv, timing
     ├── events.jsonl          normalized per-call token usage
-    ├── raw.jsonl             full request/response pairs (proxy mode)
+    ├── raw.jsonl             full request/response pairs (proxy mode); repeated request content is refs into blobs.jsonl
+    ├── blobs.jsonl           each distinct tools/system/message value, stored once
     ├── rollout-N.jsonl       copied native rollout(s) (logs mode / codex)
     └── transcript.jsonl      copied native claude transcript (imported sessions)
 ```

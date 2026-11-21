@@ -59,7 +59,7 @@ export function startProxy(opts: ProxyOptions): Promise<CaptureProxy> {
                 response: { status: proxyRes.statusCode ?? 0, headers: headerMap(proxyRes.headers, true), body: Buffer.concat(resChunks).toString('utf8') },
               });
             } catch (e) {
-              console.error('agentlens: onPair failed (fail-open):', e);
+              console.error(`agentlens: onPair failed (fail-open): ${(e as Error).message}`);
             }
           });
           // If the client disconnects mid-stream, abort the upstream request.

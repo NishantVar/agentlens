@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { mkdtempSync, readFileSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SessionWriter, StoreReader, newSessionId } from '../src/store.js';
@@ -25,6 +25,57 @@ let root: string;
 beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'agentlens-')); });
 
 describe('SessionWriter', () => {
+  it('recreates its session dir if it is removed mid-session (e.g. archived out from under it)', () => {
+    const id = newSessionId();
+    const w = new SessionWriter(root, meta(id));
+    w.appendRaw(pair(1));
+    rmSync(join(root, 'sessions', id), { recursive: true, force: true });
+    w.appendRaw(pair(2));
+    w.appendEvent(ev(2));
+    const entry = w.finalize(0);
+    expect(entry.totals.requests).toBe(1);
+    const dir = join(root, 'sessions', id);
+    expect(readFileSync(join(dir, 'raw.jsonl'), 'utf8').trim().split('\n')).toHaveLength(1);
+    expect(JSON.parse(readFileSync(join(dir, 'meta.json'), 'utf8')).id).toBe(id);
+  });
+
+  it('stores repeated request content once per session and reads it back exactly', () => {
+    const id = newSessionId();
+    const w = new SessionWriter(root, meta(id));
+    const tools = [{ name: 'Bash', description: 'd'.repeat(5000) }];
+    const msgs: unknown[] = [];
+    const bodies: string[] = [];
+    for (let i = 1; i <= 20; i++) {
+      msgs.push({ role: i % 2 ? 'user' : 'assistant', content: `turn ${i} `.repeat(50) });
+      const body = JSON.stringify({ model: 'claude-opus-4', tools, system: 's'.repeat(2000), messages: msgs });
+      bodies.push(body);
+      w.appendRaw({ ...pair(i), request: { ...pair(i).request, body } });
+    }
+    const dir = join(root, 'sessions', id);
+    const onDisk = statSync(join(dir, 'raw.jsonl')).size + statSync(join(dir, 'blobs.jsonl')).size;
+    const naive = bodies.reduce((n, b) => n + b.length, 0);
+    expect(onDisk).toBeLessThan(naive / 5);
+    expect(new StoreReader(root).readRaw(id).map((p) => p.request.body)).toEqual(bodies);
+  });
+
+  it('still reads legacy raw lines with plain bodies', () => {
+    const id = newSessionId();
+    new SessionWriter(root, meta(id));
+    const legacy = { ...pair(1), request: { ...pair(1).request, body: JSON.stringify({ messages: [{ role: 'user', content: 'x'.repeat(500) }] }) } };
+    writeFileSync(join(root, 'sessions', id, 'raw.jsonl'), JSON.stringify(legacy) + '\n');
+    expect(new StoreReader(root).readRaw(id)).toEqual([legacy]);
+  });
+
+  it('rewrites blobs after its dir is recreated so later records still resolve', () => {
+    const id = newSessionId();
+    const w = new SessionWriter(root, meta(id));
+    const body = JSON.stringify({ model: 'm', system: 's'.repeat(2000), messages: [{ role: 'user', content: 'u'.repeat(500) }] });
+    w.appendRaw({ ...pair(1), request: { ...pair(1).request, body } });
+    rmSync(join(root, 'sessions', id), { recursive: true, force: true });
+    w.appendRaw({ ...pair(2), request: { ...pair(2).request, body } });
+    expect(new StoreReader(root).readRaw(id).map((p) => p.request.body)).toEqual([body]);
+  });
+
   it('writes meta, raw, events and finalizes into the index', () => {
     const id = newSessionId();
     const w = new SessionWriter(root, meta(id));

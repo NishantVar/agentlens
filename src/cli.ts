@@ -80,6 +80,15 @@ program.command('report')
     console.log(out);
   });
 
+program.command('compact')
+  .description('Shrink finished sessions in the store by deduplicating repeated request content')
+  .action(async () => {
+    const { compactStore, mb } = await import('./compact.js');
+    const sum = compactStore(undefined, (m) => console.error(m));
+    const errs = sum.errors ? `, ${sum.errors} errors` : '';
+    process.stdout.write(`compacted ${sum.compacted} sessions: ${mb(sum.bytesBefore)} -> ${mb(sum.bytesAfter)}; skipped ${sum.skippedActive} (still running)${errs}\n`);
+  });
+
 program.command('dashboard')
   .description('Live local dashboard')
   .option('--port <n>', 'port (default 4040)', '4040')
