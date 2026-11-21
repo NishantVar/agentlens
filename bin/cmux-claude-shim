@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# agentlens shim for cmux's "Claude Binary Path" setting
+# (Settings > Automation > Claude Code; UserDefaults key claudeCodeCustomClaudePath).
+#
+# Why this exists: cmux launches claude through its own wrapper, which execs the
+# real binary by ABSOLUTE path. The `claude()` function in ~/.zshrc therefore
+# never fires, and every cmux-launched session escapes capture. cmux's wrapper
+# does honor a custom binary path, so pointing that at this script puts
+# `lens run` back in the chain:
+#
+#   cmux wrapper  ->  this shim  ->  lens run  ->  real claude
+#
+# Fail-open, like the rest of agentlens: every failure path here still ends in
+# a working claude. If this file is deleted or made non-executable, cmux ignores
+# the setting and falls back to its PATH scan — so uninstalling is safe too.
+
+set -u
+
+TAG="${AGENTLENS_CMUX_TAG:-surface=cmux}"
+
+# Agent launches must never block on an update. The native installer's
+# background updater is skipped entirely for cmux-launched agents; new
+# versions land out-of-band via the scheduled `claude update` LaunchAgent
+# (com.user.claude-autoupdate). Interactive shells are unaffected.
+export DISABLE_AUTOUPDATER=1
+
+# cmux's own guard patterns, mirrored: never hand back the wrapper or one of the
+# temporary shell shims, or the exec chain loops.
+is_wrapper_or_shim() {
+    local c="$1"
+    [[ -n "$c" ]] || return 1
+    [[ -e "$c" && -n "${SELF:-}" && "$c" -ef "$SELF" ]] && return 0
+    [[ -n "${CMUX_CLAUDE_WRAPPER_SHIM:-}" && -e "$c" && -e "$CMUX_CLAUDE_WRAPPER_SHIM" &&
+       "$c" -ef "$CMUX_CLAUDE_WRAPPER_SHIM" ]] && return 0
+    [[ -n "${CMUX_CLAUDE_WRAPPER_SHIM_ROOT:-}" &&
+       "$c" == "${CMUX_CLAUDE_WRAPPER_SHIM_ROOT%/}/claude" ]] && return 0
+    case "$c" in
+        */cmux-cli-shims/*/claude|*/cmux-cli-shims/claude) return 0 ;;
+        */Contents/Resources/bin/claude|*/Resources/bin/claude) return 0 ;;
+    esac
+    return 1
+}
+
+find_real_claude() {
+    local IFS=: d candidate
+    for d in $PATH; do
+        [[ -n "$d" ]] || continue
+        candidate="$d/claude"
+        is_wrapper_or_shim "$candidate" && continue
+        [[ -f "$candidate" && -x "$candidate" ]] && printf '%s' "$candidate" && return 0
+    done
+    return 1
+}
+
+SELF="$0"
+[[ -e "$SELF" ]] || SELF=""
+
+REAL="$(find_real_claude)" || {
+    echo "agentlens: real claude not found in PATH" >&2
+    exit 127
+}
+
+# Already inside a capture (a nested spawn, or the shell function got here
+# first): a second `lens run` would start a second proxy and split one session
+# in two. Hand off to claude directly.
+[[ -n "${AGENTLENS_CAPTURE:-}" ]] && exec "$REAL" "$@"
+
+# No observer installed is not a reason to block the agent.
+command -v lens >/dev/null 2>&1 || exec "$REAL" "$@"
+
+exec lens run --tag "$TAG" -- "$REAL" "$@"

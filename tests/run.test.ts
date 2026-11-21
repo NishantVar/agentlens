@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import http from 'node:http';
-import { mkdtempSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
@@ -39,6 +39,22 @@ writeFileSync(join(day, 'rollout-test.jsonl'), process.env.FAKE_ROLLOUT);
 process.exit(0);
 `, { mode: 0o755 });
 
+// Fake "claude" that only reports the env it was launched with (capture-marker probe).
+const probeDir = mkdtempSync(join(tmpdir(), 'probebin-'));
+writeFileSync(join(probeDir, 'claude'), `#!/usr/bin/env node
+require('node:fs').writeFileSync(process.env.ENV_PROBE_OUT, JSON.stringify({
+  capture: process.env.AGENTLENS_CAPTURE ?? null,
+  base: process.env.ANTHROPIC_BASE_URL ?? null,
+}));
+process.exit(0);
+`, { mode: 0o755 });
+writeFileSync(join(probeDir, 'codex'), `#!/usr/bin/env node
+require('node:fs').writeFileSync(process.env.ENV_PROBE_OUT, JSON.stringify({
+  capture: process.env.AGENTLENS_CAPTURE ?? null,
+}));
+process.exit(0);
+`, { mode: 0o755 });
+
 let home: string;
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'agentlens-home-'));
@@ -61,6 +77,27 @@ describe('lensRun', () => {
     expect(raw[0].request.path).toBe('/v1/messages');
     expect(raw[0].seq).toBe(1);
     expect(entry.nativeSessionIds).toEqual(['22222222-2222-2222-2222-222222222222']);
+  });
+
+  it('marks the child environment so a nested wrap can skip re-capturing (proxy mode)', async () => {
+    const out = join(home, 'probe.json');
+    process.env.ENV_PROBE_OUT = out;
+    const code = await lensRun({ tags: [], argv: [join(probeDir, 'claude')], upstreamOverride: upstreamOrigin });
+    delete process.env.ENV_PROBE_OUT;
+    expect(code).toBe(0);
+    const env = JSON.parse(readFileSync(out, 'utf8'));
+    expect(env.capture).toBe('1');
+    expect(env.base).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+  });
+
+  it('marks the child environment in logs mode too (no proxy to infer from)', async () => {
+    const out = join(home, 'probe.json');
+    process.env.ENV_PROBE_OUT = out;
+    process.env.AGENTLENS_CODEX_SESSIONS = mkdtempSync(join(tmpdir(), 'codex-sessions-'));
+    const code = await lensRun({ tags: [], argv: [join(probeDir, 'codex')] });
+    delete process.env.ENV_PROBE_OUT;
+    expect(code).toBe(0);
+    expect(JSON.parse(readFileSync(out, 'utf8')).capture).toBe('1');
   });
 
   it('propagates the child exit code', async () => {

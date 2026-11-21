@@ -103,9 +103,14 @@ export function lensRun(opts: RunOptions): Promise<number> {
         console.error(`agentlens: capture setup failed, running unwrapped (fail-open): ${(e as Error).message}`);
         writer = null; proxy = null;
       }
+      // Marker for wrappers that sit in front of the agent binary (the cmux
+      // shim, the shell functions): a nested `lens run` under an already-active
+      // capture would start a second proxy and split one session in two, so
+      // they exec straight through when they see this.
+      const captureEnv = writer ? { AGENTLENS_CAPTURE: '1' } : {};
       const child = spawn(opts.argv[0], opts.argv.slice(1), {
         stdio: 'inherit',
-        env: { ...process.env, ...extraEnv },
+        env: { ...process.env, ...captureEnv, ...extraEnv },
       });
       child.on('error', (e) => {
         console.error(`agentlens: failed to launch ${opts.argv[0]}: ${e.message}`);
