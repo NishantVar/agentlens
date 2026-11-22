@@ -152,14 +152,14 @@ describe('ALF-16 build identity', () => {
     git(dir, 'add', '-A'); git(dir, 'commit', '-q', '-m', 'later');
     return git(dir, 'rev-parse', 'HEAD');
   };
-  // The advertised commit supplied the compiled sources, or the commit is unknown.
-  function expectHonest(dir: string, head: string, out: string) {
-    const fromLater = existsSync(join(dir, 'dist', 'later.js'));
-    expect([`${VERSION} ${head}`, `${VERSION} unknown`]).toContain(out);
-    if (fromLater) expect(out, 'output compiled from the later commit is advertised as the first').toBe(`${VERSION} unknown`);
+  // The sources were copied from the first commit before the move, so the build
+  // is that commit's: it must say so, and nothing from the later commit is built.
+  function expectFirst(dir: string, head: string, out: string) {
+    expect(existsSync(join(dir, 'dist', 'later.js')), 'output compiled from the later commit').toBe(false);
+    expect(out).toBe(`${VERSION} ${head}`);
   }
 
-  it('ALF-16 [head-moved-during-build] a checkout move while the build is under way never stamps the new commit', async () => {
+  it('ALF-16 [head-moved-during-build] a checkout move while the build is under way prints the first commit, never the new one', async () => {
     const { dir, head } = checkoutCopy(true);
     const c = gatedCompiler(dir);
     await c.at('started'); c.open('go-compile');
@@ -170,10 +170,10 @@ describe('ALF-16 build identity', () => {
     expect(await c.exited).toBe(0);
     const out = versionVia(dir, other);
     expect(out).not.toContain(moved);
-    expectHonest(dir, head!, out);
+    expectFirst(dir, head!, out);
   }, T);
 
-  it('ALF-16 [head-round-trip-during-build] sources from another commit compiled between two matching HEAD samples are never advertised as the first commit', async () => {
+  it('ALF-16 [head-round-trip-during-build] sources from another commit compiled between two matching HEAD samples never happen: the build prints the first commit', async () => {
     const { dir, head } = checkoutCopy(true);
     const c = gatedCompiler(dir);
     await c.at('started');
@@ -186,7 +186,7 @@ describe('ALF-16 build identity', () => {
     expect(await c.exited).toBe(0);
     const out = versionVia(dir, other);
     expect(out).not.toContain(moved);
-    expectHonest(dir, head!, out);
+    expectFirst(dir, head!, out);
   }, T);
 
   it('ALF-16 [uncommitted-source] a build of uncommitted source edits compiles them and prints unknown', () => {
@@ -195,6 +195,24 @@ describe('ALF-16 build identity', () => {
     const b = build(dir);
     expect(b.status, b.stderr).toBe(0);
     expect(existsSync(join(dir, 'dist', 'later.js'))).toBe(true);
+    expect(versionVia(dir, other)).toBe(`${VERSION} unknown`);
+  }, T);
+
+  it('ALF-16 [uncommitted-source] a build with an edited tracked source file compiles the edit and prints unknown', () => {
+    const { dir } = checkoutCopy(true);
+    writeFileSync(join(dir, 'src', 'cli.ts'), readFileSync(join(dir, 'src', 'cli.ts'), 'utf8') + '// uncommitted-edit-marker\n');
+    const b = build(dir);
+    expect(b.status, b.stderr).toBe(0);
+    expect(readFileSync(join(dir, 'dist', 'cli.js'), 'utf8')).toContain('uncommitted-edit-marker');
+    expect(versionVia(dir, other)).toBe(`${VERSION} unknown`);
+  }, T);
+
+  it('ALF-16 [uncommitted-source] a build with an edited package.json prints unknown', () => {
+    const { dir } = checkoutCopy(true);
+    const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ ...pkg, description: `${pkg.description ?? ''} (edited)` }, null, 2) + '\n');
+    const b = build(dir);
+    expect(b.status, b.stderr).toBe(0);
     expect(versionVia(dir, other)).toBe(`${VERSION} unknown`);
   }, T);
 });
