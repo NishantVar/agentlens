@@ -40,7 +40,15 @@ export function normalizeAnthropic(contentType: string | undefined, body: string
     for (const { data } of parseSse(body)) {
       const d = data as Any;
       if (d?.type === 'message_start' && d.message?.usage) { model = d.message.model ?? ''; usage = anthropicUsage(d.message.usage); }
-      if (d?.type === 'message_delta' && d.usage && usage) usage.output = n(d.usage.output_tokens);
+      // message_delta's counts are cumulative: a present one replaces the
+      // opening value, an omitted one keeps it (as Anthropic's SDK does).
+      if (d?.type === 'message_delta' && d.usage && usage) {
+        const u = d.usage;
+        if (typeof u.output_tokens === 'number') usage.output = u.output_tokens;
+        if (typeof u.input_tokens === 'number') usage.input = u.input_tokens;
+        if (typeof u.cache_read_input_tokens === 'number') usage.cacheRead = u.cache_read_input_tokens;
+        if (typeof u.cache_creation_input_tokens === 'number') usage.cacheWrite = u.cache_creation_input_tokens;
+      }
     }
     return usage && model ? { model, usage } : null;
   }

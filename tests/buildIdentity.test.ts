@@ -4,7 +4,7 @@
 // the built CLI the way Flux does: through a symlink, from another directory.
 import { describe, it, expect, beforeAll } from 'vitest';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmp } from './helpers/lens.js';
@@ -117,5 +117,39 @@ describe('ALF-16 build identity', () => {
     await exited;
     expect(before).toBe(`${VERSION} ${head}`);
     expect(versionVia(dir, other)).toBe(`${VERSION} unknown`);
+  }, T);
+  it('ALF-16 [head-moved-during-build] a checkout move while the build is under way never stamps the new commit', async () => {
+    const { dir, head } = checkoutCopy(true);
+    // A compiler that runs the real tsc, then waits at a gate before reporting
+    // success: the checkout moves while the build's output is from the old commit.
+    const gate = tmp('agentlens-gate-');
+    rmSync(join(dir, 'node_modules'));
+    mkdirSync(join(dir, 'node_modules'));
+    for (const name of readdirSync(join(REPO, 'node_modules'))) if (name !== 'typescript') symlinkSync(join(REPO, 'node_modules', name), join(dir, 'node_modules', name));
+    mkdirSync(join(dir, 'node_modules', 'typescript', 'bin'), { recursive: true });
+    writeFileSync(join(dir, 'node_modules', 'typescript', 'package.json'), JSON.stringify({ name: 'typescript', version: '0.0.0' }));
+    writeFileSync(join(dir, 'node_modules', 'typescript', 'bin', 'tsc'), [
+      "const { spawnSync } = require('node:child_process'); const fs = require('node:fs');",
+      `const r = spawnSync(process.execPath, [${JSON.stringify(join(REPO, 'node_modules', 'typescript', 'bin', 'tsc'))}, ...process.argv.slice(2)], { stdio: 'inherit' });`,
+      `fs.writeFileSync(${JSON.stringify(join(gate, 'emitted'))}, '');`,
+      `while (!fs.existsSync(${JSON.stringify(join(gate, 'go'))})) spawnSync('sleep', ['0.05']);`,
+      'process.exit(r.status ?? 1);',
+    ].join('\n'));
+    const p = spawn('npm', ['run', 'build', '--silent'], { cwd: dir, stdio: 'ignore' });
+    const exited = new Promise<number | null>((r) => p.on('exit', (code) => r(code)));
+    const t0 = Date.now();
+    while (!existsSync(join(gate, 'emitted')) && Date.now() - t0 < 90_000) await new Promise((r) => setTimeout(r, 20));
+    expect(existsSync(join(gate, 'emitted')), 'compiler never reached the gate').toBe(true);
+    // the checkout moves to a commit whose sources the build did not compile
+    writeFileSync(join(dir, 'src', 'later.ts'), 'export const later = 1;\n');
+    git(dir, 'add', '-A'); git(dir, 'commit', '-q', '-m', 'later');
+    const moved = git(dir, 'rev-parse', 'HEAD');
+    expect(moved).not.toBe(head);
+    writeFileSync(join(gate, 'go'), '');
+    expect(await exited).toBe(0);
+    expect(existsSync(join(dir, 'dist', 'later.js'))).toBe(false);
+    const out = versionVia(dir, other);
+    expect(out).not.toContain(moved);
+    expect(out).toBe(`${VERSION} unknown`);
   }, T);
 });

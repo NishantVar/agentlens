@@ -198,8 +198,11 @@ the older `token_count` lines, which can repeat or miss requests. Two cases are
 known gaps: a session started by an older Codex and resumed by 0.171+ in the same
 rollout does not count its requests from before the upgrade, and a forked child
 rollout with no completed response of its own is priced from the parent's copied
-`token_count` lines. Codex costs saved before this change are not recomputed, and
-may overstate cache writes and repeat or miss requests.
+`token_count` lines. Sessions saved before this change keep their stored usage
+counts and are not re-extracted from their rollouts. `stats` and the dashboard
+compute cost when you run them, from those stored counts and the current price
+table, so older Codex usage may still overstate cache writes and repeat or miss
+requests.
 
 ### Overrides
 
