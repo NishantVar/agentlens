@@ -86,7 +86,10 @@ its tags and the usage from before the resume, tokens the resume adds are not
 counted, and the wrapper names the rollout on stderr. An import interrupted
 after it claimed a rollout leaves it uncounted, and later imports skip it,
 until `lens recover` finalizes the idle import session: recover then counts the
-claimed rollout once, in full, under the import's tags. `--since` bounds the scan by the log's own
+claimed rollout once, in full, under the import's tags. An import interrupted
+before it claimed or counted anything is never indexed: `lens recover` removes
+that idle session, names it on stderr, and says to run `lens import` again,
+which counts the rollout once, in full. `--since` bounds the scan by the log's own
 start time; `--tag` tags every session imported in the batch (`AGENTLENS_TAGS`
 still wins on collision). Timing, cwd, models, and token usage all come from
 the logs themselves. Prints `imported N, skipped M (already present), skipped
