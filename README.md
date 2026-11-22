@@ -13,6 +13,12 @@ npm run build
 npm link      # puts `lens` on your PATH
 ```
 
+`npm run build` also records the git commit it was built from. `lens --version`
+prints `<version> <commit>`, for example `0.1.0 c62a7c5…` (the full 40-character
+commit), wherever it is run from and even after the checkout moves on. It prints
+`unknown` for the commit when the build was made outside a git checkout, or when
+the last build failed or was stopped before it finished; rebuild to fix that.
+
 Requires Node >= 20 and the agent CLI you want to observe (`claude` and/or
 `codex`) installed and authenticated on the same machine.
 

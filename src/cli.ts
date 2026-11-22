@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
+import { buildIdentity } from './buildInfo.js';
 
 const program = new Command();
-program.name('lens').description('Observability for coding agents').version('0.1.0');
+program.name('lens').description('Observability for coding agents').version(buildIdentity());
 program.enablePositionalOptions();
 
 program.command('run')
