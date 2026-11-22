@@ -71,8 +71,18 @@ with `AGENTLENS_CODEX_SESSIONS`). Sessions are deduped by native session id —
 both against previous imports and against sessions already captured by
 `lens run` — so re-running is safe. A codex rollout that a running `lens run`
 session's processes hold open for writing is also skipped, even before that
-session has claimed it: the session counts it. If open-file evidence cannot be
-read, nothing is held back and import says so on stderr. `--since` bounds the scan by the log's own
+session has claimed it: the session counts it. Those processes include any the
+session has seen in its tree that has since been reparented. A session whose
+`lens run` process identity is unknown holds nothing back.
+
+Import records the same per-rollout claim a `lens run` session does, and the
+first claim wins. If open-file evidence cannot be read, nothing is held back
+and import says so on stderr. A running session's rollout imported that way is
+counted once, under the import's tags. A `lens run -- codex resume` of a
+rollout that is already counted (by import, including an import from before
+import recorded claims) counts nothing for that rollout: the one entry keeps
+its tags and the usage from before the resume, tokens the resume adds are not
+counted, and the wrapper names the rollout on stderr. `--since` bounds the scan by the log's own
 start time; `--tag` tags every session imported in the batch (`AGENTLENS_TAGS`
 still wins on collision). Timing, cwd, models, and token usage all come from
 the logs themselves. Prints `imported N, skipped M (already present), skipped

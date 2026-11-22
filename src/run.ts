@@ -125,6 +125,7 @@ export function lensRun(opts: RunOptions): Promise<number> {
             exitCode: code, role: 'writer', meta, log, prepared,
             nativeSessionIds: nativeIds.size ? [...nativeIds] : undefined,
           });
+          for (const p of looker?.lostToImport ?? []) log(`agentlens: rollout already counted by \`lens import\`, not counted again: ${p}`);
           if (entry) {
             if (meta.capture === 'logs') nameUnclaimed(root, meta, log);
             const t = entry.totals;

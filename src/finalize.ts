@@ -164,6 +164,10 @@ export function finalizeSession(root: string, id: string, o: FinalizeOpts): Inde
   const nativeIds = new Set([...(meta.nativeSessionIds ?? []), ...(o.nativeSessionIds ?? [])]);
 
   const claims = meta.capture === 'logs' ? (o.claims ?? claimsOf(listClaims(root), id)) : [];
+  // A rollout already counted under another entry (an import made before
+  // import recorded claims) is not counted again by a later session.
+  const counted = new Set<string>();
+  if (claims.length) for (const e of readLines<IndexEntry>(join(root, 'index.jsonl'))) if (e.runtime === meta.runtime && e.id !== id) for (const n of e.nativeSessionIds ?? []) counted.add(n);
   if (claims.length) {
     const events: NormalizedEvent[] = [];
     for (const [i, c] of claims.entries()) {
@@ -177,6 +181,7 @@ export function finalizeSession(root: string, id: string, o: FinalizeOpts): Inde
         const text = readFileSync(copy, 'utf8');
         got = { scan: scanRollout(text), commit: () => {} };
       }
+      if (got.scan.nativeId && counted.has(got.scan.nativeId)) { log(`agentlens: rollout already counted by an earlier session, not counted again: ${c.rollout}`); continue; }
       for (const ev of got.scan.events) events.push({ ...ev, seq: events.length + 1 });
       if (got.scan.nativeId) nativeIds.add(got.scan.nativeId);
       got.commit(copy);

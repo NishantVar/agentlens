@@ -51,6 +51,13 @@ export function tryClaim(root: string, rec: ClaimRecord): 'won' | 'mine' | 'lost
   return readClaim(root, rec.rollout)?.session === rec.session ? 'mine' : 'lost';
 }
 
+// A claim recorded by `lens import`: its session's meta has an import source.
+export function claimedByImport(root: string, rollout: string): boolean {
+  const c = readClaim(root, rollout);
+  if (!c) return false;
+  try { return JSON.parse(readFileSync(join(root, 'sessions', c.session, 'meta.json'), 'utf8'))?.source?.kind === 'import'; } catch { return false; }
+}
+
 export function listClaims(root: string): ClaimRecord[] {
   const d = claimsDir(root);
   if (!existsSync(d)) return [];
@@ -135,6 +142,7 @@ export const LOOK_DELAY_MS = 900; // < 1 s after each look ends, by construction
 export class Looker {
   private owned = new Map<string, ProcIdentity[]>();
   private lost = new Set<string>();
+  readonly lostToImport = new Set<string>();
   private remembered = new Map<number, string>(); // pid -> start time
   private chain: Promise<void> = Promise.resolve();
   private stopped = false;
@@ -200,7 +208,8 @@ export class Looker {
           continue;
         }
         const r = tryClaim(this.root, { rollout: path, session: this.session, holders, claimedAt: new Date().toISOString() });
-        if (r === 'lost') this.lost.add(path); else this.owned.set(path, [...holders]);
+        if (r === 'lost') { this.lost.add(path); if (claimedByImport(this.root, path)) this.lostToImport.add(path); }
+        else this.owned.set(path, [...holders]);
       }
     }
     const lookLog = process.env.AGENTLENS_TEST_LOOK_LOG;

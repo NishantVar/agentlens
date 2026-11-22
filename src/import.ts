@@ -1,9 +1,9 @@
-import { copyFileSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { copyFileSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { SessionWriter, StoreReader, newSessionId, storeRoot } from './store.js';
 import { claudeProjectsRoot, extractClaudeSessionIdFromRawBody, findClaudeTranscripts, parseClaudeTranscript } from './claudeTranscript.js';
 import { listCodexRollouts, rolloutNativeSessionId } from './codexRollout.js';
-import { codexSessionsRoot, hasClaim, readTree, writersOf } from './claims.js';
+import { codexSessionsRoot, hasClaim, readTree, tryClaim, writersOf } from './claims.js';
 import { descendantsIn, liveness, procTable } from './procinfo.js';
 import { parseSince } from './query.js';
 import { resolveTags } from './tags.js';
@@ -84,7 +84,9 @@ export async function runImport(opts: ImportOptions): Promise<ImportSummary> {
   const known = knownNativeIds(reader, root);
   const sum: ImportSummary = { imported: 0, skippedExisting: 0, skippedEmpty: 0, errors: 0 };
 
-  const consider = (runtime: Runtime, sourcePath: string, copyName: string, c: Candidate) => {
+  // `claim` is the real path of a codex rollout: import records the per-rollout
+  // claim before it counts it, so the first claim, import's or a session's, wins.
+  const consider = (runtime: Runtime, sourcePath: string, copyName: string, c: Candidate, claim?: string) => {
     if (since && (!c.startedAt || new Date(c.startedAt) < since)) return; // out of scope, not counted
     if (c.events.length === 0) { sum.skippedEmpty++; return; }
     if (!c.nativeSessionId) {
@@ -98,13 +100,18 @@ export async function runImport(opts: ImportOptions): Promise<ImportSummary> {
       lensVersion: LENS_VERSION, startedAt: c.startedAt ?? new Date().toISOString(),
       nativeSessionIds: [c.nativeSessionId], source: { kind: 'import', path: sourcePath },
     });
+    if (claim && tryClaim(root, { rollout: claim, session: writer.id, holders: [], claimedAt: new Date().toISOString() }) !== 'won') {
+      rmSync(join(root, 'sessions', writer.id), { recursive: true, force: true });
+      sum.skippedExisting++;
+      return;
+    }
     for (const [i, ev] of c.events.entries()) writer.appendEvent({ ...ev, seq: i + 1 });
     try {
       copyFileSync(sourcePath, join(root, 'sessions', writer.id, copyName));
     } catch (e) {
       console.error(`agentlens: source copy failed (fail-open): ${(e as Error).message}`);
     }
-    writer.finalize(0, { endedAt: c.endedAt });
+    writer.finalize(0, { endedAt: c.endedAt, claims: [] }); // counted from the events above
     known.add(`${runtime}:${c.nativeSessionId}`);
     sum.imported++;
   };
@@ -132,7 +139,7 @@ export async function runImport(opts: ImportOptions): Promise<ImportSummary> {
         let real = r.rolloutPath;
         try { real = realpathSync(r.rolloutPath); } catch { /* compare as listed */ }
         if (held.has(real)) { sum.skippedExisting++; continue; }
-        consider('codex', r.rolloutPath, 'rollout-1.jsonl', r);
+        consider('codex', r.rolloutPath, 'rollout-1.jsonl', r, real);
       } catch (e) {
         sum.errors++;
         console.error(`agentlens: import failed for ${r.rolloutPath} (skipped): ${(e as Error).message}`);
