@@ -1,9 +1,10 @@
-import { copyFileSync, readFileSync, readdirSync } from 'node:fs';
+import { copyFileSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { SessionWriter, StoreReader, newSessionId, storeRoot } from './store.js';
 import { claudeProjectsRoot, extractClaudeSessionIdFromRawBody, findClaudeTranscripts, parseClaudeTranscript } from './claudeTranscript.js';
 import { listCodexRollouts, rolloutNativeSessionId } from './codexRollout.js';
-import { hasClaim } from './claims.js';
+import { codexSessionsRoot, hasClaim, writersOf } from './claims.js';
+import { descendantsIn, liveness, procTable } from './procinfo.js';
 import { parseSince } from './query.js';
 import { resolveTags } from './tags.js';
 import type { NormalizedEvent, Runtime } from './types.js';
@@ -44,7 +45,27 @@ function knownNativeIds(reader: StoreReader, root: string): Set<string> {
   return known;
 }
 
-export function runImport(opts: ImportOptions): ImportSummary {
+// Rollouts that a process in a live `lens run` Codex session's tree holds open
+// for writing. That wrapper will claim them, so importing one now would count
+// it twice; it is left to its session. Rollouts written outside any `lens run`
+// are unaffected. Without open-file evidence nothing is held back (fail-open).
+async function wrappedLiveRollouts(reader: StoreReader): Promise<Set<string>> {
+  const wrappers = reader.listActive().filter((m) => m.runtime === 'codex' && m.capture === 'logs' && m.wrapper && liveness(m.wrapper) !== 'gone');
+  if (!wrappers.length) return new Set();
+  let rootReal: string | null = null;
+  try { rootReal = realpathSync(codexSessionsRoot()); } catch { return new Set(); }
+  const table = await procTable();
+  const roots = wrappers.map((m) => m.wrapper!.pid);
+  const pids = table ? [...roots, ...descendantsIn(table, roots)] : roots;
+  const ev = await writersOf(pids, rootReal);
+  if (!ev.ok) {
+    console.error(`agentlens: cannot read open-file evidence (${ev.reason}); rollouts of running \`lens run\` sessions may be imported`);
+    return new Set();
+  }
+  return new Set(ev.held.map((h) => h.path));
+}
+
+export async function runImport(opts: ImportOptions): Promise<ImportSummary> {
   const root = storeRoot();
   const reader = new StoreReader(root);
   const since = opts.since ? parseSince(opts.since) : undefined;
@@ -89,10 +110,17 @@ export function runImport(opts: ImportOptions): ImportSummary {
     }
   }
   if (opts.runtime !== 'claude') {
-    for (const r of listCodexRollouts()) {
+    // List first, then look: a rollout created after the look is not listed.
+    const rollouts = listCodexRollouts();
+    const held = await wrappedLiveRollouts(reader);
+    for (const r of rollouts) {
       try {
-        // A claimed rollout belongs to a `lens run` session, finalized or not.
+        // A claimed rollout belongs to a `lens run` session, finalized or not;
+        // so does one a running session's tree is writing but has not claimed yet.
         if (hasClaim(root, r.rolloutPath)) { sum.skippedExisting++; continue; }
+        let real = r.rolloutPath;
+        try { real = realpathSync(r.rolloutPath); } catch { /* compare as listed */ }
+        if (held.has(real)) { sum.skippedExisting++; continue; }
         consider('codex', r.rolloutPath, 'rollout-1.jsonl', r);
       } catch (e) {
         sum.errors++;

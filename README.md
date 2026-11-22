@@ -69,7 +69,10 @@ claude's native transcripts (`~/.claude/projects/**/*.jsonl`, override with
 `AGENTLENS_CLAUDE_PROJECTS`) and codex's rollouts (`~/.codex/sessions`, override
 with `AGENTLENS_CODEX_SESSIONS`). Sessions are deduped by native session id —
 both against previous imports and against sessions already captured by
-`lens run` — so re-running is safe. `--since` bounds the scan by the log's own
+`lens run` — so re-running is safe. A codex rollout that a running `lens run`
+session's processes hold open for writing is also skipped, even before that
+session has claimed it: the session counts it. If open-file evidence cannot be
+read, nothing is held back and import says so on stderr. `--since` bounds the scan by the log's own
 start time; `--tag` tags every session imported in the batch (`AGENTLENS_TAGS`
 still wins on collision). Timing, cwd, models, and token usage all come from
 the logs themselves. Prints `imported N, skipped M (already present), skipped

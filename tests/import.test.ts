@@ -30,9 +30,9 @@ const seedCodex = () => {
 };
 
 describe('runImport', () => {
-  it('imports claude + codex logs with metadata from the logs themselves', () => {
+  it('imports claude + codex logs with metadata from the logs themselves', async () => {
     seedClaude(); seedCodex();
-    const sum = runImport({ tag: ['origin=backfill'] });
+    const sum = await runImport({ tag: ['origin=backfill'] });
     expect(sum).toEqual({ imported: 2, skippedExisting: 0, skippedEmpty: 0, errors: 0 });
     const r = new StoreReader(home);
     const entries = r.listIndex();
@@ -53,13 +53,13 @@ describe('runImport', () => {
     expect(existsSync(join(home, 'sessions', codex.id, 'rollout-1.jsonl'))).toBe(true);
   });
 
-  it('is idempotent — second run skips everything', () => {
+  it('is idempotent — second run skips everything', async () => {
     seedClaude(); seedCodex();
-    runImport({ tag: [] });
-    expect(runImport({ tag: [] })).toEqual({ imported: 0, skippedExisting: 2, skippedEmpty: 0, errors: 0 });
+    await runImport({ tag: [] });
+    expect(await runImport({ tag: [] })).toEqual({ imported: 0, skippedExisting: 2, skippedEmpty: 0, errors: 0 });
   });
 
-  it('dedups against a legacy lens-run claude session via raw.jsonl metadata', () => {
+  it('dedups against a legacy lens-run claude session via raw.jsonl metadata', async () => {
     // legacy proxy-captured session: no nativeSessionIds, but raw body carries _session_<uuid>
     const w = new SessionWriter(home, {
       id: 'legacy-1', runtime: 'claude', capture: 'proxy', tags: {}, cwd: '/repo', argv: ['claude'],
@@ -70,10 +70,10 @@ describe('runImport', () => {
       response: { status: 200, headers: {}, body: '{}' } });
     w.finalize(0);
     seedClaude(); // same SID
-    expect(runImport({ tag: [] })).toEqual({ imported: 0, skippedExisting: 1, skippedEmpty: 0, errors: 0 });
+    expect(await runImport({ tag: [] })).toEqual({ imported: 0, skippedExisting: 1, skippedEmpty: 0, errors: 0 });
   });
 
-  it('dedups against a legacy lens-run codex session via its copied rollout', () => {
+  it('dedups against a legacy lens-run codex session via its copied rollout', async () => {
     const w = new SessionWriter(home, {
       id: 'legacy-2', runtime: 'codex', capture: 'logs', tags: {}, cwd: '/repo', argv: ['codex'],
       lensVersion: '0.1.0', startedAt: '2026-07-14T18:07:00.000Z',
@@ -81,33 +81,33 @@ describe('runImport', () => {
     writeFileSync(join(home, 'sessions', 'legacy-2', 'rollout-1.jsonl'), rolloutFixture('/repo'));
     w.finalize(0);
     seedCodex(); // same native id 019f-test
-    expect(runImport({ tag: [] })).toEqual({ imported: 0, skippedExisting: 1, skippedEmpty: 0, errors: 0 });
+    expect(await runImport({ tag: [] })).toEqual({ imported: 0, skippedExisting: 1, skippedEmpty: 0, errors: 0 });
   });
 
-  it('skips empty transcripts, honors --runtime and --since', () => {
+  it('skips empty transcripts, honors --runtime and --since', async () => {
     mkdirSync(join(projects, '-repo'), { recursive: true });
     writeFileSync(join(projects, '-repo', 'noise.jsonl'), claudeNoiseFixture());
     seedCodex();
-    expect(runImport({ runtime: 'claude', tag: [] })).toEqual({ imported: 0, skippedExisting: 0, skippedEmpty: 1, errors: 0 });
+    expect(await runImport({ runtime: 'claude', tag: [] })).toEqual({ imported: 0, skippedExisting: 0, skippedEmpty: 1, errors: 0 });
     // codex rollout started 2026-07-14 — far outside a 1-minute window, silently out of scope
-    expect(runImport({ runtime: 'codex', since: '1m', tag: [] })).toEqual({ imported: 0, skippedExisting: 0, skippedEmpty: 0, errors: 0 });
-    expect(runImport({ runtime: 'codex', tag: [] }).imported).toBe(1);
+    expect(await runImport({ runtime: 'codex', since: '1m', tag: [] })).toEqual({ imported: 0, skippedExisting: 0, skippedEmpty: 0, errors: 0 });
+    expect((await runImport({ runtime: 'codex', tag: [] })).imported).toBe(1);
   });
 
-  it('counts an unidentifiable log (no session id) as an error and does not import it', () => {
+  it('counts an unidentifiable log (no session id) as an error and does not import it', async () => {
     mkdirSync(join(codexRoot, 'x'), { recursive: true });
     // token_count but no session_meta line
     writeFileSync(join(codexRoot, 'x', 'rollout-noid.jsonl'),
       rolloutFixture('/repo').split('\n').filter((l) => !l.includes('session_meta')).join('\n'));
-    const sum = runImport({ runtime: 'codex', tag: [] });
+    const sum = await runImport({ runtime: 'codex', tag: [] });
     expect(sum.errors).toBe(1);
     expect(sum.imported).toBe(0);
   });
 
-  it('AGENTLENS_TAGS overrides --tag on collision', () => {
+  it('AGENTLENS_TAGS overrides --tag on collision', async () => {
     process.env.AGENTLENS_TAGS = 'origin=env';
     seedClaude();
-    runImport({ runtime: 'claude', tag: ['origin=flag', 'extra=1'] });
+    await runImport({ runtime: 'claude', tag: ['origin=flag', 'extra=1'] });
     delete process.env.AGENTLENS_TAGS;
     const [e] = new StoreReader(home).listIndex();
     expect(e.tags).toEqual({ origin: 'env', extra: '1' });
