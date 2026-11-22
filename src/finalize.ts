@@ -37,10 +37,17 @@ export interface FinalizeOpts {
 // from them only if the path is still the same file (dev, ino) and still starts
 // with exactly these bytes; otherwise it reads the current file in full.
 export interface PreparedRollout { offset: number; scan: RolloutScan; tmp: string; dev: number; ino: number; prefix: Buffer }
-export type Prepared = Map<string, PreparedRollout>;
+// `stale`: temp copies whose removal failed, kept for finalize's cleanup.
+export class Prepared extends Map<string, PreparedRollout> { readonly stale = new Set<string>(); }
+
+// Best effort: a temp copy that cannot be removed now stays in `stale` for the
+// next cleanup, and a failed removal never stops the session being saved.
+function removeTemp(tmp: string, stale: Set<string> | undefined): void {
+  try { hook('finalize:before-temp-rm'); rmSync(tmp, { force: true }); stale?.delete(tmp); } catch { stale?.add(tmp); }
+}
 
 /** Read this session's claimed rollouts so far, adding to `prepared`; fail-open. */
-export function prepareClaims(root: string, id: string, prepared: Prepared = new Map()): Prepared {
+export function prepareClaims(root: string, id: string, prepared: Prepared = new Prepared()): Prepared {
   try {
     const dir = join(root, 'sessions', id);
     for (const c of claimsOf(listClaims(root), id)) {
@@ -56,8 +63,9 @@ export function prepareClaims(root: string, id: string, prepared: Prepared = new
         hook('finalize:after-prepare-temp');
         prepared.set(c.rollout, { offset: prefix.length, scan: scanRollout(prefix.toString('utf8')), tmp, dev: st.dev, ino: st.ino, prefix });
       } catch {
-        // finalize reads it in full; a temp copy made before the failure goes now
-        if (tmp) try { rmSync(tmp, { force: true }); } catch { /* best effort */ }
+        // finalize reads it in full; a temp copy made before the failure goes now,
+        // or at finalize's cleanup if it cannot be removed yet
+        if (tmp) removeTemp(tmp, prepared.stale);
       }
     }
   } catch { /* finalize reads them in full */ }
@@ -80,7 +88,7 @@ function readFrom(path: string, p: PreparedRollout): Buffer | null {
 }
 
 // The claimed rollout's scan, and a step that leaves its full copy at `copy`.
-function readClaimed(path: string, p: PreparedRollout | undefined): { scan: RolloutScan; commit: (copy: string) => void } {
+function readClaimed(path: string, p: PreparedRollout | undefined, stale: Set<string> | undefined): { scan: RolloutScan; commit: (copy: string) => void } {
   if (p) {
     let tail: Buffer | null | undefined;
     try { tail = readFrom(path, p); } catch { tail = undefined; }
@@ -90,7 +98,7 @@ function readClaimed(path: string, p: PreparedRollout | undefined): { scan: Roll
       const rest = scanRollout(tail.toString('utf8'), p.scan);
       return { scan: { ...rest, events: [...p.scan.events, ...rest.events] }, commit: (copy) => renameSync(p.tmp, copy) };
     }
-    rmSync(p.tmp, { force: true });
+    removeTemp(p.tmp, stale);
   }
   const text = readFileSync(path, 'utf8');
   return { scan: scanRollout(text), commit: (copy) => writeAtomic(copy, text) };
@@ -163,7 +171,7 @@ export function finalizeSession(root: string, id: string, o: FinalizeOpts): Inde
       const p = o.prepared?.get(c.rollout);
       o.prepared?.delete(c.rollout);
       let got: ReturnType<typeof readClaimed>;
-      try { got = readClaimed(c.rollout, p); }
+      try { got = readClaimed(c.rollout, p, o.prepared?.stale); }
       catch (e) {
         if (!existsSync(copy)) { log(`agentlens: claimed rollout unreadable, not counted: ${c.rollout} (${(e as Error).message})`); continue; }
         const text = readFileSync(copy, 'utf8');
@@ -177,8 +185,11 @@ export function finalizeSession(root: string, id: string, o: FinalizeOpts): Inde
     }
   }
 
-  for (const p of o.prepared?.values() ?? []) rmSync(p.tmp, { force: true });
-  o.prepared?.clear();
+  if (o.prepared) {
+    for (const p of o.prepared.values()) o.prepared.stale.add(p.tmp);
+    o.prepared.clear();
+    for (const t of [...o.prepared.stale]) removeTemp(t, o.prepared.stale);
+  }
 
   const endedAt = o.endedAt ?? new Date().toISOString();
   const nativeSessionIds = nativeIds.size ? [...nativeIds] : undefined;

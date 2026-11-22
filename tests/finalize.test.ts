@@ -3,9 +3,9 @@ import { appendFileSync, chmodSync, mkdirSync, readFileSync, readdirSync, rename
 import { join } from 'node:path';
 import { finalizeSession, prepareClaims } from '../src/finalize.js';
 import { scanRollout } from '../src/codexRollout.js';
-import { tryClaim } from '../src/claims.js';
+import { listClaims, tryClaim } from '../src/claims.js';
 import type { SessionMeta } from '../src/types.js';
-import { metaLines, tmp, usageLine } from './helpers/lens.js';
+import { index, metaLines, tmp, usageLine } from './helpers/lens.js';
 
 // ALF-2 / ALF-4 [large-claimed] support: a rollout read ahead of finalize
 // (prepareClaims) must give the same entry and copy as reading it in full.
@@ -59,6 +59,22 @@ describe('finalize with claimed rollouts read ahead', () => {
       expect(entry.totals).toMatchObject({ input: 100, output: 10, requests: 1 });
       expect(readFileSync(join(dir, 'rollout-1.jsonl'), 'utf8')).toBe(before);
     } finally { chmodSync(rollout, 0o644); }
+  });
+
+  it('ALF-4 [prepare-fails] a temp copy that cannot be removed at finalize does not stop the entry being saved with full usage', () => {
+    const { root, id, dir, meta, rollout } = setup();
+    const other = rollout.replace('rollout-a', 'rollout-b');
+    writeFileSync(other, [...metaLines('native-b', '/fixture'), usageLine({ input: 7, cached: 0, output: 1 })].map((l) => l + '\n').join(''));
+    tryClaim(root, { rollout: other, session: id, holders: [], claimedAt: new Date().toISOString() });
+    const prepared = prepareClaims(root, id);
+    const claims = listClaims(root).filter((c) => c.rollout === rollout); // b's read-ahead is left for cleanup
+    process.env.AGENTLENS_TEST_HOOKS = 'finalize:before-temp-rm=throw';
+    let entry;
+    try { entry = finalizeSession(root, id, { exitCode: 0, role: 'writer', meta, prepared, claims, log: () => {} }); }
+    finally { delete process.env.AGENTLENS_TEST_HOOKS; }
+    expect(entry?.totals).toMatchObject({ input: 100, output: 10, requests: 1 });
+    expect(index(root).map((x) => x.id)).toEqual([id]);
+    expect(readFileSync(join(dir, 'rollout-1.jsonl'), 'utf8')).toBe(readFileSync(rollout, 'utf8'));
   });
 
   it('ALF-2 [rewritten-rollout] a rollout replaced or rewritten after the read-ahead, at least as long, is counted and copied from its current version only', () => {

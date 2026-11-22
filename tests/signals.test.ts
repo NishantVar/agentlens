@@ -232,6 +232,33 @@ describe('save on pane close or process stop', () => {
     expect(readdirSync(sdir).filter((f) => f.startsWith('rollout-prepared.'))).toEqual([]);
   }, 60000);
 
+  it('ALF-4 [prepare-fails] a read-ahead temp whose first removal fails is removed by the later cleanup; double preparation, full usage, entry within grace + 1 s', async () => {
+    const grace = 1000;
+    const e = claudeEnv({ AGENTLENS_SIGNAL_GRACE_MS: String(grace) });
+    const p = rolloutPath(e, 'rmfail'); const s = (n: string) => join(e.sync, n); const lk = s('looks.jsonl');
+    // First read-ahead (after the forward) fails after its temp copy, and removing
+    // that copy fails once. The second (at the exit look) and finalize succeed.
+    const hooks = 'finalize:after-prepare-temp=throw-once,finalize:before-temp-rm=throw-once';
+    const r = lensRunFake(e, 'codex', [
+      { open: p }, { write: p, lines: [...metaLines('rmfail', e.cwd), usageLine({ input: 40, cached: 0, output: 4 })] },
+      { touch: s('ready') }, { forever: true },
+    ], { AGENTLENS_TEST_LOOK_LOG: lk, AGENTLENS_TEST_HOOKS: hooks, FAKE_IGNORE_SIGNALS: '1', FAKE_PIDFILE: s('pid') });
+    cleanup.push(() => { killQuiet(r.child.pid); if (existsSync(s('pid'))) killQuiet(pidOf(s('pid'))); });
+    await waitFor(() => existsSync(s('ready')) && looks(lk).some((l) => l.claimed.length > 0), T, 'rollout claimed');
+    const sent = Date.now();
+    process.kill(r.child.pid!, 'SIGTERM');
+    const done = await r.done;
+    expect(done.at - sent).toBeLessThan(grace + 1000);
+    expect(done.code).toBe(status('SIGTERM'));
+    const entries = index(e.home);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].totals).toMatchObject({ input: 40, output: 4, requests: 1 });
+    expect(entries[0].nativeSessionIds).toEqual(['rmfail']);
+    const sdir = join(e.home, 'sessions', entries[0].id);
+    expect(readFileSync(join(sdir, 'rollout-1.jsonl'), 'utf8')).toBe(readFileSync(p, 'utf8'));
+    expect(readdirSync(sdir).filter((f) => f.startsWith('rollout-prepared.'))).toEqual([]);
+  }, 60000);
+
   it('ALF-39 [late-lookup] a look result that misses the stop deadline is unreadable evidence: nothing claimed, entry saved, reason and rollout on stderr', async () => {
     const grace = 1000;
     const e = claudeEnv({ AGENTLENS_SIGNAL_GRACE_MS: String(grace) });
