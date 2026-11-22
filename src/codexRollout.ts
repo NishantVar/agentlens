@@ -18,10 +18,17 @@ function lines(jsonlText: string): Any[] {
   return out;
 }
 
-export function parseRollout(jsonlText: string): NormalizedEvent[] {
+// One pass over rollout text: usage events plus the native session id (from the
+// first session_meta). `from` continues a scan of the text before this chunk, so
+// a rollout can be read in two parts that end and start on a line boundary.
+export interface RolloutScan { events: NormalizedEvent[]; model: string; sawMeta: boolean; nativeId?: string }
+export function scanRollout(jsonlText: string, from?: RolloutScan): RolloutScan {
   const events: NormalizedEvent[] = [];
-  let model = 'unknown';
+  let model = from?.model ?? 'unknown';
+  let sawMeta = from?.sawMeta ?? false;
+  let nativeId = from?.nativeId;
   for (const d of lines(jsonlText)) {
+    if (!sawMeta && d?.type === 'session_meta') { sawMeta = true; if (typeof d.payload?.id === 'string') nativeId = d.payload.id; }
     if (d?.type === 'turn_context' && d.payload?.model) model = d.payload.model;
     if (d?.type === 'event_msg' && d.payload?.type === 'token_count') {
       const u = d.payload.info?.last_token_usage;
@@ -34,8 +41,10 @@ export function parseRollout(jsonlText: string): NormalizedEvent[] {
       });
     }
   }
-  return events;
+  return { events, model, sawMeta, nativeId };
 }
+
+export const parseRollout = (jsonlText: string): NormalizedEvent[] => scanRollout(jsonlText).events;
 
 export function extractMessages(jsonlText: string): { role: string; text: string }[] {
   const out: { role: string; text: string }[] = [];

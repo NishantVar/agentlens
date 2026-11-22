@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { join } from 'node:path';
-import { existsSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { constants } from 'node:os';
 import {
   freshEnv, index, killQuiet, lensRunFake, metaLines, mockUpstream, pidOf, rolloutPath, touch, usageLine, waitFor, claims, looks,
@@ -168,6 +169,40 @@ describe('save on pane close or process stop', () => {
     expect(entries).toHaveLength(1);
     expect(entries[0].totals).toMatchObject({ input: 500, output: 50, requests: 1 });
   }, T);
+
+  it('ALF-4 [large-claimed] a large claimed rollout still saves in full within grace + 1 s when a slow look reaches the cutoff', async () => {
+    const grace = 1000;
+    const e = claudeEnv({ AGENTLENS_SIGNAL_GRACE_MS: String(grace) });
+    cleanup.push(() => { rmSync(e.codex, { recursive: true, force: true }); rmSync(e.home, { recursive: true, force: true }); });
+    const lsof = gatedLsof(e, 5); // reaches the cutoff; the 2 s lookup timeout ends it
+    const p = rolloutPath(e, 'large'); const s = (n: string) => join(e.sync, n); const lk = s('looks.jsonl');
+    // ~96 MiB of ordinary rollout lines with one usage line in the middle, then the agent adds one more.
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, metaLines('large', e.cwd).map((l) => l + '\n').join(''));
+    const filler = JSON.stringify({ timestamp: new Date().toISOString(), type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'x'.repeat(1000) }] } }) + '\n';
+    const chunk = filler.repeat(1024);
+    for (let i = 0; i < 48; i++) appendFileSync(p, chunk);
+    appendFileSync(p, usageLine({ input: 700, cached: 0, output: 70 }) + '\n');
+    for (let i = 0; i < 48; i++) appendFileSync(p, chunk);
+    const r = lensRunFake(e, 'codex', [
+      { open: p }, { write: p, lines: [usageLine({ input: 300, cached: 0, output: 30 })] },
+      { touch: s('ready') }, { forever: true },
+    ], { AGENTLENS_LSOF: lsof, AGENTLENS_TEST_LOOK_LOG: lk, FAKE_IGNORE_SIGNALS: '1', FAKE_PIDFILE: s('pid') });
+    cleanup.push(() => { killQuiet(r.child.pid); if (existsSync(s('pid'))) killQuiet(pidOf(s('pid'))); });
+    await waitFor(() => existsSync(s('ready')), T, 'fake codex ready');
+    await waitFor(() => looks(lk).some((l) => l.claimed.length > 0), T, 'rollout claimed');
+    touch(s('go'));
+    await waitFor(() => lsofStarts(e).length > 0, T, 'slow look in flight');
+    const sent = Date.now();
+    process.kill(r.child.pid!, 'SIGTERM');
+    const done = await r.done;
+    expect(done.at - sent).toBeLessThan(grace + 1000);
+    expect(done.code).toBe(status('SIGTERM'));
+    const entries = index(e.home);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].totals).toMatchObject({ input: 1000, output: 100, requests: 2 });
+    expect(r.err().match(/open-file lookup still running at the stop deadline/g)).toHaveLength(1);
+  }, 60000);
 
   it('ALF-39 [late-lookup] a look result that misses the stop deadline is unreadable evidence: nothing claimed, entry saved, reason and rollout on stderr', async () => {
     const grace = 1000;

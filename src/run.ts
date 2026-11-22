@@ -6,7 +6,7 @@ import { detectRuntime, getAdapter, type RuntimeAdapter } from './runtimes.js';
 import { resolveTags } from './tags.js';
 import { extractClaudeSessionIdFromRawBody } from './claudeTranscript.js';
 import { Looker, nameUnclaimed, type LookClock } from './claims.js';
-import { finalizeSession } from './finalize.js';
+import { finalizeSession, prepareClaims, type Prepared } from './finalize.js';
 import { identityOf } from './procinfo.js';
 import type { NormalizedEvent, RawPair, Runtime, SessionMeta } from './types.js';
 
@@ -67,6 +67,10 @@ export function lensRun(opts: RunOptions): Promise<number> {
     let signalled: Sig | null = null;
     let childExit: { code: number | null; signal: NodeJS.Signals | null } | null = null;
     let onChildExit: (() => void) | null = null;
+    // Claimed rollouts read ahead while the wrapper only waits, so finalizing
+    // after a stop deadline reads just what was written since.
+    let prepared: Prepared | undefined;
+    const prepare = () => { if (writer && meta?.capture === 'logs') prepared = prepareClaims(root, writer.id, prepared); };
 
     const handlers = new Map<Sig, () => void>();
     const removeHandlers = () => { for (const [s, h] of handlers) process.removeListener(s, h); handlers.clear(); };
@@ -112,13 +116,14 @@ export function lensRun(opts: RunOptions): Promise<number> {
       try {
         if (looker) {
           const last = looker.look('exit').then(() => true);
+          prepare(); // while the exit look runs
           const inTime = lookBy === undefined ? await last : await Promise.race([last, until(lookBy).then(() => false)]);
           looker.stop();
           if (!inTime) log('agentlens: open-file lookup still running at the stop deadline; no Codex rollout claimed from it');
         }
         if (writer && meta) {
           const entry = finalizeSession(root, writer.id, {
-            exitCode: code, role: 'writer', meta, log,
+            exitCode: code, role: 'writer', meta, log, prepared,
             nativeSessionIds: nativeIds.size ? [...nativeIds] : undefined,
           });
           if (entry) {
@@ -154,6 +159,7 @@ export function lensRun(opts: RunOptions): Promise<number> {
         if (!childExit) await Promise.race([exited, until(t0 + FORWARD_SETTLE_MS)]);
         if (!childExit) await Promise.race([exited, look, until(t0 + SIGNAL_LOOK_CAP_MS)]);
         if (!childExit && child?.pid) { try { child.kill(s); } catch { /* already gone */ } }
+        if (!childExit) prepare(); // while the child has until the deadline
         if (!childExit) await Promise.race([exited, until(deadline)]);
         await finish(childStatus(s), deadline + STOP_LOOK_SLACK_MS);
       })();
