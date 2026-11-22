@@ -24,8 +24,14 @@ const isSse = (ct?: string) => !!ct && ct.includes('text/event-stream');
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
 
+// cache_creation splits writes by duration; a total-only count is all 5m.
+export function anthropicWriteLong(u: Any): { cacheWriteLong?: number } {
+  const long = u?.cache_creation?.ephemeral_1h_input_tokens;
+  return typeof long === 'number' && long > 0 ? { cacheWriteLong: long } : {};
+}
+
 function anthropicUsage(u: Any): Usage {
-  return { input: n(u?.input_tokens), output: n(u?.output_tokens), cacheRead: n(u?.cache_read_input_tokens), cacheWrite: n(u?.cache_creation_input_tokens), reasoning: 0 };
+  return { input: n(u?.input_tokens), output: n(u?.output_tokens), cacheRead: n(u?.cache_read_input_tokens), cacheWrite: n(u?.cache_creation_input_tokens), reasoning: 0, ...anthropicWriteLong(u) };
 }
 
 export function normalizeAnthropic(contentType: string | undefined, body: string): ModelCall | null {

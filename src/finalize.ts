@@ -96,7 +96,7 @@ function readClaimed(path: string, p: PreparedRollout | undefined, stale: Set<st
     if (tail) {
       appendFileSync(p.tmp, tail);
       const rest = scanRollout(tail.toString('utf8'), p.scan);
-      return { scan: { ...rest, events: [...p.scan.events, ...rest.events] }, commit: (copy) => renameSync(p.tmp, copy) };
+      return { scan: rest, commit: (copy) => renameSync(p.tmp, copy) }; // rest covers the whole rollout
     }
     removeTemp(p.tmp, stale);
   }

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { NormalizedEvent } from './types.js';
+import type { NormalizedEvent, Usage } from './types.js';
 
 export interface CollectOpts { sessionsRoot?: string; cwd?: string }
 export interface CollectedSession { rolloutPath: string; events: NormalizedEvent[]; nativeSessionId?: string }
@@ -20,28 +20,41 @@ function lines(jsonlText: string): Any[] {
 
 // One pass over rollout text: usage events plus the native session id (from the
 // first session_meta). `from` continues a scan of the text before this chunk, so
-// a rollout can be read in two parts that end and start on a line boundary.
-export interface RolloutScan { events: NormalizedEvent[]; model: string; sawMeta: boolean; nativeId?: string }
+// a rollout can be read in two parts that end and start on a line boundary; the
+// result covers the whole rollout, both parts.
+//
+// Usage source is chosen per rollout (issue planner, 02-codex-usage-decision.md):
+// Codex 0.171+ writes one token_usage_record per completed response, while its
+// token_count lines can repeat or drop requests. If any record exists, only
+// records are counted; otherwise token_count lines are. Both candidate lists are
+// carried across parts so a record first seen in the tail still wins.
+export interface RolloutScan {
+  events: NormalizedEvent[]; model: string; sawMeta: boolean; nativeId?: string;
+  records: NormalizedEvent[]; counts: NormalizedEvent[];
+}
+
+// input_tokens includes cache reads and writes; uncached input is the rest.
+function codexUsage(u: Any): Usage {
+  const cached = n(u.cached_input_tokens), write = n(u.cache_write_input_tokens);
+  return { input: Math.max(0, n(u.input_tokens) - cached - write), output: n(u.output_tokens), cacheRead: cached, cacheWrite: write, reasoning: n(u.reasoning_output_tokens) };
+}
+
 export function scanRollout(jsonlText: string, from?: RolloutScan): RolloutScan {
-  const events: NormalizedEvent[] = [];
+  const records = [...(from?.records ?? [])];
+  const counts = [...(from?.counts ?? [])];
   let model = from?.model ?? 'unknown';
   let sawMeta = from?.sawMeta ?? false;
   let nativeId = from?.nativeId;
+  const push = (list: NormalizedEvent[], ts: unknown, u: Any) => list.push({
+    ts: typeof ts === 'string' ? ts : '', seq: list.length + 1, kind: 'api_call', model, usage: codexUsage(u), durationMs: 0, status: 200,
+  });
   for (const d of lines(jsonlText)) {
     if (!sawMeta && d?.type === 'session_meta') { sawMeta = true; if (typeof d.payload?.id === 'string') nativeId = d.payload.id; }
     if (d?.type === 'turn_context' && d.payload?.model) model = d.payload.model;
-    if (d?.type === 'event_msg' && d.payload?.type === 'token_count') {
-      const u = d.payload.info?.last_token_usage;
-      if (!u) continue;
-      const cached = n(u.cached_input_tokens);
-      events.push({
-        ts: d.timestamp ?? '', seq: events.length + 1, kind: 'api_call', model,
-        usage: { input: n(u.input_tokens) - cached, output: n(u.output_tokens), cacheRead: cached, cacheWrite: 0, reasoning: n(u.reasoning_output_tokens) },
-        durationMs: 0, status: 200,
-      });
-    }
+    if (d?.type === 'token_usage_record' && d.payload?.usage) push(records, d.timestamp, d.payload.usage);
+    if (d?.type === 'event_msg' && d.payload?.type === 'token_count' && d.payload.info?.last_token_usage) push(counts, d.timestamp, d.payload.info.last_token_usage);
   }
-  return { events, model, sawMeta, nativeId };
+  return { events: records.length ? records : counts, model, sawMeta, nativeId, records, counts };
 }
 
 export const parseRollout = (jsonlText: string): NormalizedEvent[] => scanRollout(jsonlText).events;

@@ -80,7 +80,7 @@ Aggregates token counts and estimated cost.
 - `--since <dur>` — only sessions started within the window: `7d`, `24h`, `30m`.
 - `--runtime claude|codex` — filter by runtime.
 - `--json` — machine-readable output (`{ rows, generatedAt }`).
-Cost is derived per model from the pricing table (see below); events whose model
+Cost is derived per request from the pricing table (see Pricing); events whose model
 has no known price are excluded from cost and flagged in a footnote.
 
 ### `lens sessions [--tag k=v ...] [--since <dur>] [--json]`
@@ -145,7 +145,7 @@ All sessions land in one global store, independent of the directory you run from
 ```
 ~/.agent-obs/                 (override with AGENTLENS_HOME)
 ├── index.jsonl               one line per finalized session (the query index; carries nativeSessionIds for import dedup)
-├── pricing.json              optional pricing overrides (see below)
+├── pricing.json              optional pricing overrides (see Pricing)
 ├── claims/<sha256>.json      which session owns each Codex rollout (one file per rollout, never two owners)
 └── sessions/<id>/
     ├── meta.json             runtime, capture mode, tags, cwd, argv, timing, `lens run` pid + start time
@@ -164,10 +164,46 @@ All sessions land in one global store, independent of the directory you run from
   `raw.jsonl` and the codex rollout copies include everything the agent sent and
   received.
 
-## Pricing overrides
+## Pricing
 
-Cost estimates use a built-in per-million-token price table (Claude Opus/Sonnet/
-Haiku, GPT-5). To override or add models, create `~/.agent-obs/pricing.json`:
+Cost is the API list-price equivalent: what the same requests would cost at each
+vendor's Standard global rates, by prompt-length tier and cache-write duration.
+If you use Claude or Codex on a subscription, you do not pay this amount.
+
+The built-in table covers Claude Fable 5.2, Opus 5.5, Sonnet 5.5 and Haiku 5.5
+(from https://platform.claude.com/docs/en/about-claude/pricing) and GPT-6.2 Astra,
+GPT-6.2 Sol, GPT-6.1 Sol, GPT-6 Astra and GPT-6 Luna (from
+https://developers.openai.com/api/docs/pricing), as published on 2026-11-22, plus
+older Claude 4 and GPT-5 entries.
+
+Each request is priced on its own:
+
+- **Prompt length.** A request's prompt is its uncached input plus cache reads
+  plus cache writes. If it is over the model's threshold (Haiku 5.5: 100,000
+  tokens; the OpenAI models: 272,000), the long-prompt rates apply to the whole
+  request: input, output, cache reads and cache writes. At or below the
+  threshold, the base rates apply. OpenAI's 272K limit is assumed to count cached
+  input.
+- **Cache-write duration.** Claude 5m and 1h writes are priced at their own rates
+  when the transcript or proxied response reports the split. A write with only a
+  total count, including every session saved before this change, is priced at the
+  5m rate. Codex cache writes are priced at the 30m rate.
+
+Not applied: fast mode, Batch/Flex/Priority processing, Anthropic's US-only 1.1×
+inference and OpenAI's regional-processing +10%.
+
+**Codex usage source.** Codex 0.171+ writes one usage record per completed
+response, and agentlens counts those when a rollout has any; otherwise it counts
+the older `token_count` lines, which can repeat or miss requests. Two cases are
+known gaps: a session started by an older Codex and resumed by 0.171+ in the same
+rollout does not count its requests from before the upgrade, and a forked child
+rollout with no completed response of its own is priced from the parent's copied
+`token_count` lines. Codex costs saved before this change are not recomputed, and
+may overstate cache writes and repeat or miss requests.
+
+### Overrides
+
+To override or add models, create `~/.agent-obs/pricing.json`:
 
 ```json
 {
@@ -177,8 +213,12 @@ Haiku, GPT-5). To override or add models, create `~/.agent-obs/pricing.json`:
 ```
 
 Prices are USD per 1M tokens. Model matching is longest-prefix, so a key like
-`claude-haiku-4` matches `claude-haiku-4-5-20251001`. User entries merge over (and
-override) the built-ins.
+`claude-haiku-4` matches `claude-haiku-4-5-20251001`. A user entry replaces the
+whole built-in entry for its key. Two optional fields add tiers:
+`cacheWriteLong` (the 1h or 12h write rate; without it every write is priced at
+`cacheWrite`) and `long` (`{ "threshold", "input", "output", "cacheRead",
+"cacheWrite", "cacheWriteLong"? }`, the rates for a request whose prompt is over
+`threshold`; without it every request is priced at one rate).
 
 ## Supported runtimes
 
