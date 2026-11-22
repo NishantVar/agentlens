@@ -103,6 +103,7 @@ export async function runImport(opts: ImportOptions): Promise<ImportSummary> {
       lensVersion: LENS_VERSION, startedAt: c.startedAt ?? new Date().toISOString(),
       nativeSessionIds: [c.nativeSessionId], source: { kind: 'import', path: sourcePath },
     });
+    if (claim) hook('import:before-claim');
     if (claim && tryClaim(root, { rollout: claim, session: writer.id, holders: [], claimedAt: new Date().toISOString() }) !== 'won') {
       rmSync(join(root, 'sessions', writer.id), { recursive: true, force: true });
       sum.skippedExisting++;
