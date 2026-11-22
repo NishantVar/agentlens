@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { join } from 'node:path';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { constants } from 'node:os';
 import {
   freshEnv, index, killQuiet, lensRunFake, metaLines, mockUpstream, pidOf, rolloutPath, touch, usageLine, waitFor, claims, looks,
@@ -131,6 +131,72 @@ describe('save on pane close or process stop', () => {
     const entries = index(e.home);
     expect(entries).toHaveLength(1);
     expect(entries[0].totals).toMatchObject({ input: 600, output: 60, requests: 1 });
+  }, T);
+
+  // lsof is fast until <sync>/go exists; then each call marks its start and
+  // sleeps before the real scan, so the scan sees what is open at its end.
+  const gatedLsof = (e: { sync: string }, delay: number) => {
+    const f = join(e.sync, 'lsof');
+    writeFileSync(f, `#!/bin/sh\nif [ -e "${e.sync}/go" ]; then : > "${e.sync}/lsof.$$.started"; sleep ${delay}; fi\nexec lsof "$@"\n`, { mode: 0o755 });
+    return f;
+  };
+  const lsofStarts = (e: { sync: string }) => readdirSync(e.sync).filter((f) => f.startsWith('lsof.') && f.endsWith('.started'));
+
+  it('ALF-42 [signal-first-seen] a rollout first seen by a slow look in flight at the signal is counted, within grace + 1 s', async () => {
+    const grace = 1000;
+    const e = claudeEnv({ AGENTLENS_SIGNAL_GRACE_MS: String(grace) });
+    const lsof = gatedLsof(e, 1.5);
+    const p = rolloutPath(e, 'late'); const s = (n: string) => join(e.sync, n); const lk = s('looks.jsonl');
+    const r = lensRunFake(e, 'codex', [
+      { touch: s('ready') }, { wait: s('open') }, { open: p },
+      { write: p, lines: [...metaLines('late', e.cwd), usageLine({ input: 500, cached: 0, output: 50 })] },
+      { touch: s('opened') }, { forever: true },
+    ], { AGENTLENS_LSOF: lsof, AGENTLENS_TEST_LOOK_LOG: lk, FAKE_IGNORE_SIGNALS: '1', FAKE_PIDFILE: s('pid') });
+    cleanup.push(() => { killQuiet(r.child.pid); if (existsSync(s('pid'))) killQuiet(pidOf(s('pid'))); });
+    await waitFor(() => existsSync(s('ready')) && looks(lk).length > 0, T, 'first look done');
+    touch(s('go'));
+    await waitFor(() => lsofStarts(e).length > 0, T, 'slow look in flight');
+    touch(s('open'));
+    await waitFor(() => existsSync(s('opened')), T, 'rollout opened');
+    const sent = Date.now();
+    process.kill(r.child.pid!, 'SIGTERM');
+    const done = await r.done;
+    expect(done.at - sent).toBeLessThan(grace + 1000);
+    expect(done.code).toBe(status('SIGTERM'));
+    expect(looks(lk).filter((l) => l.claimed.length > 0 && l.endedAt < sent)).toEqual([]); // no prior claim
+    const entries = index(e.home);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].totals).toMatchObject({ input: 500, output: 50, requests: 1 });
+  }, T);
+
+  it('ALF-39 [late-lookup] a look result that misses the stop deadline is unreadable evidence: nothing claimed, entry saved, reason and rollout on stderr', async () => {
+    const grace = 1000;
+    const e = claudeEnv({ AGENTLENS_SIGNAL_GRACE_MS: String(grace) });
+    const lsof = gatedLsof(e, 5); // past the deadline; the 2 s lookup timeout ends it
+    const p = rolloutPath(e, 'past'); const s = (n: string) => join(e.sync, n); const lk = s('looks.jsonl');
+    const r = lensRunFake(e, 'codex', [
+      { touch: s('ready') }, { wait: s('open') }, { open: p },
+      { write: p, lines: [...metaLines('past', e.cwd), usageLine({ input: 800, cached: 0, output: 80 })] },
+      { touch: s('opened') }, { forever: true },
+    ], { AGENTLENS_LSOF: lsof, AGENTLENS_TEST_LOOK_LOG: lk, FAKE_IGNORE_SIGNALS: '1', FAKE_PIDFILE: s('pid') });
+    cleanup.push(() => { killQuiet(r.child.pid); if (existsSync(s('pid'))) killQuiet(pidOf(s('pid'))); });
+    await waitFor(() => existsSync(s('ready')) && looks(lk).length > 0, T, 'first look done');
+    touch(s('go'));
+    await waitFor(() => lsofStarts(e).length > 0, T, 'slow look in flight');
+    touch(s('open')); // opens after the previous look's scan
+    await waitFor(() => existsSync(s('opened')), T, 'rollout opened');
+    const sent = Date.now();
+    process.kill(r.child.pid!, 'SIGTERM');
+    const done = await r.done;
+    expect(done.at - sent).toBeLessThan(grace + 1000);
+    expect(done.code).toBe(status('SIGTERM'));
+    const real = realpathSync(p);
+    expect(claims(e.home).filter((c) => c.rollout === real)).toEqual([]);
+    const entries = index(e.home);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].totals).toMatchObject({ input: 0, output: 0 });
+    expect(r.err().match(/open-file lookup still running at the stop deadline; no Codex rollout claimed from it/g)).toHaveLength(1);
+    expect(r.err()).toContain(`not counted: ${real}`);
   }, T);
 });
 

@@ -18,11 +18,13 @@ type Sig = typeof SIGNALS[number];
 const FORWARD_SETTLE_MS = 200;
 const graceMs = () => Number(process.env.AGENTLENS_SIGNAL_GRACE_MS) || 3000;
 // Open-file lookups can be slow (ps and lsof each time out at 2 s), so after a
-// signal they never hold the stop: the signal look gets until this long after
-// the signal before forwarding, and the exit look until this long after the
-// grace deadline. A look still running then is abandoned and claims nothing.
+// signal they never hold the stop past grace + 1 s: the signal look gets until
+// this long after the signal before forwarding, and looks still running at the
+// grace deadline get until grace + 1 s minus the time kept for finalize and
+// exit. A look still running then counts as unreadable evidence: it claims
+// nothing, and stderr says so once.
 const SIGNAL_LOOK_CAP_MS = 500;
-const EXIT_LOOK_SLACK_MS = 400;
+const STOP_LOOK_SLACK_MS = 1000 - 200;
 const until = (t: number) => new Promise<void>((r) => setTimeout(r, Math.max(0, t - Date.now())));
 const signo = (s: string) => (constants.signals as Record<string, number>)[s] ?? 0;
 
@@ -109,9 +111,10 @@ export function lensRun(opts: RunOptions): Promise<number> {
       finishing = true;
       try {
         if (looker) {
-          const last = looker.look('exit');
-          await (lookBy === undefined ? last : Promise.race([last, until(lookBy)]));
+          const last = looker.look('exit').then(() => true);
+          const inTime = lookBy === undefined ? await last : await Promise.race([last, until(lookBy).then(() => false)]);
           looker.stop();
+          if (!inTime) log('agentlens: open-file lookup still running at the stop deadline; no Codex rollout claimed from it');
         }
         if (writer && meta) {
           const entry = finalizeSession(root, writer.id, {
@@ -152,7 +155,7 @@ export function lensRun(opts: RunOptions): Promise<number> {
         if (!childExit) await Promise.race([exited, look, until(t0 + SIGNAL_LOOK_CAP_MS)]);
         if (!childExit && child?.pid) { try { child.kill(s); } catch { /* already gone */ } }
         if (!childExit) await Promise.race([exited, until(deadline)]);
-        await finish(childStatus(s), deadline + EXIT_LOOK_SLACK_MS);
+        await finish(childStatus(s), deadline + STOP_LOOK_SLACK_MS);
       })();
     };
 

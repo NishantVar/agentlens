@@ -192,7 +192,9 @@ CLIs expose their model traffic very differently:
   counted; it is named on stderr after the run. Start time and folder only
   narrow which rollouts are named, never which are counted. Open-file evidence
   comes from `lsof` (override with `AGENTLENS_LSOF`); if it cannot be read,
-  stderr says so and no rollout is counted.
+  stderr says so and no rollout is counted. After a signal, a look still
+  running at the stop deadline (grace plus under a second) counts as evidence
+  that could not be read: nothing is claimed from it and stderr says why.
 
 ### Adding a runtime
 

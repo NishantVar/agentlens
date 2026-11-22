@@ -148,7 +148,7 @@ export const eventLines = (home: string, id: string) => {
   const p = join(home, 'sessions', id, 'events.jsonl');
   return existsSync(p) ? readFileSync(p, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
 };
-export const looks = (file: string): { n: number; reason: string; claimed: string[] }[] => existsSync(file)
+export const looks = (file: string): { n: number; reason: string; startedAt: number; endedAt: number; claimed: string[] }[] => existsSync(file)
   ? readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
 export const pidAlive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === 'EPERM'; } };
 export const pidOf = (file: string) => Number(readFileSync(file, 'utf8'));

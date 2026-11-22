@@ -357,6 +357,30 @@ describe('review 3: recovery races and damage', () => {
     expect(rows[1].totals).toMatchObject({ input: 70, output: 7, requests: 1 });
   }, T);
 
+  it('ALF-37 [torn-append-race] a partial append by another session between the tail check and the append does not swallow the entry', async () => {
+    const e = freshEnv();
+    finalizedSession(e.home, 'older', { input: 5, output: 1 });
+    writeSession(e.home, { id: 'next', wrapper: await deadIdentity(), usages: [{ input: 70, output: 7 }] });
+    const rec = spawnLens(['recover'], { ...e.env, AGENTLENS_TEST_HOOKS: `finalize:before-index-append=pause:${e.sync}` });
+    await waitFor(() => readdirSync(e.sync).some((f) => f.startsWith('finalize:before-index-append.') && f.endsWith('.reached')), T, 'finalizer at the append');
+    // Another session's finalizer dies partway through its index append.
+    const dead = await deadIdentity();
+    const dir = writeSession(e.home, { id: 'partial', wrapper: dead, usages: [{ input: 30, output: 3 }] });
+    writeFileSync(join(dir, 'final.0.json'), JSON.stringify({ ...dead, role: 'writer', at: new Date().toISOString() }));
+    writeFileSync(join(e.home, 'index.jsonl'), '{"id":"partial","runtime":"cla', { flag: 'a' });
+    touch(join(e.sync, 'finalize:before-index-append.release'));
+    const first = await rec.done;
+    expect(first.code).toBe(0);
+    expect(rec.out()).toContain('recovered 1');
+    expect(new StoreReader(e.home).listIndex().map((r) => r.id)).toEqual(['older', 'next']); // readable at once
+    expect((await recover(e)).code).toBe(0); // retry recovers the session whose append was torn
+    expect((await recover(e)).code).toBe(0);
+    const rows = new StoreReader(e.home).listIndex();
+    expect(rows.map((r) => r.id).sort()).toEqual(['next', 'older', 'partial']);
+    expect(rows.find((r) => r.id === 'next')!.totals).toMatchObject({ input: 70, output: 7, requests: 1 });
+    expect(rows.find((r) => r.id === 'partial')!.totals).toMatchObject({ input: 30, output: 3, requests: 1 });
+  }, T);
+
   it('ALF-7 [no-wrapper-identity] a live session whose wrapper identity could not be read is not taken for legacy', async () => {
     const e = freshEnv();
     const ps = join(e.sync, 'ps');
