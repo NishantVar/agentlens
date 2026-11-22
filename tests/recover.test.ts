@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, utimesSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -371,7 +371,8 @@ describe('lens import before the first claim (PR #3)', () => {
     expect(JSON.parse(r.out)).toMatchObject({ imported: 1 });
     expect(r.err).toMatch(/cannot read open-file evidence/);
   }, T);
-  it('[import-lookup-lost] import cannot read open-file evidence, then the wrapper claims: one entry, with the wrapped tags', async () => {
+  // Route ruling §1 (option B): the first claim wins; with degraded evidence the one entry may carry the import's tags.
+  it('[import-lookup-lost] import cannot read open-file evidence, then the wrapper looks: one entry, with the import\'s tags, and stderr says why', async () => {
     const e = freshEnv();
     const s = (n: string) => join(e.sync, n);
     const held = join(e.sync, 'lsof');
@@ -388,14 +389,18 @@ describe('lens import before the first claim (PR #3)', () => {
 
     const imp = await runLens(['import', '--runtime', 'codex', '--json', '--tag', 'agent=imported'], { ...e.env, AGENTLENS_LSOF: '/nonexistent/lsof' });
     expect(imp.code).toBe(0);
+    expect(imp.err).toMatch(/cannot read open-file evidence/);
 
     touch(s('go'));
-    await waitFor(() => looks(lk).some((l) => l.claimed.length > 0), T, 'wrapped rollout claimed');
+    const after = looks(lk).length;
+    await waitFor(() => looks(lk).length >= after + 2, T, 'two wrapper looks with real lsof');
     touch(s('exit'));
-    expect((await r.done).code).toBe(0);
+    const done = await r.done;
+    expect(done.code).toBe(0);
+    expect(r.err()).toContain(realpathSync(wrapped));
     const of = index(e.home).filter((x) => x.nativeSessionIds?.includes('wrapped'));
     expect(of).toHaveLength(1);
-    expect(of[0].tags).toEqual({ agent: 'wrapped' });
+    expect(of[0].tags).toEqual({ agent: 'imported' });
     expect(of[0].totals).toMatchObject({ input: 120, output: 30, requests: 1 });
   }, T);
 
@@ -460,6 +465,80 @@ describe('lens import before the first claim (PR #3)', () => {
     const of = index(e.home).filter((x) => x.nativeSessionIds?.includes('independent'));
     expect(of).toHaveLength(1);
     expect(of[0].tags).toEqual({ agent: 'imported' });
+  }, T);
+  // Route ruling §2: a wrapped resume of an already-counted rollout counts nothing for it and names it.
+  const closedRollout = (e: Env, name: string) => {
+    const p = rolloutPath(e, name);
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, [...metaLines(name, e.cwd), usageLine({ input: 50, cached: 0, output: 5 })].join('\n') + '\n');
+    return p;
+  };
+  const resumeWrapped = (e: Env, p: string, ready: string, exit: string) => lensRunFake(e, 'codex', [
+    { open: p }, { write: p, lines: [usageLine({ input: 20, cached: 0, output: 2 })] }, { touch: ready }, { wait: exit }, { close: p },
+  ], { AGENTLENS_TEST_LOOK_LOG: join(e.sync, 'looks.jsonl'), AGENTLENS_TAGS: 'agent=wrapped' });
+  const forgetClaim = (e: Env, p: string) => rmSync(join(e.home, 'claims', claimHash(realpathSync(p)) + '.json'), { force: true });
+  const onlyEntry = (e: Env, id: string) => {
+    const of = index(e.home).filter((x) => x.nativeSessionIds?.includes(id));
+    expect(of).toHaveLength(1);
+    expect(of[0].tags).toEqual({ agent: 'imported' });
+    expect(of[0].totals).toMatchObject({ input: 50, output: 5, requests: 1 });
+  };
+
+  it('[resume-after-import] a wrapped resume of an imported rollout keeps the one imported entry and names the rollout', async () => {
+    const e = freshEnv();
+    const s = (n: string) => join(e.sync, n);
+    const p = closedRollout(e, 'resumed');
+    const imp = await runLens(['import', '--runtime', 'codex', '--json', '--tag', 'agent=imported'], e.env);
+    expect(JSON.parse(imp.out)).toMatchObject({ imported: 1 });
+    const r = resumeWrapped(e, p, s('ready'), s('exit'));
+    cleanup.push(() => { touch(s('exit')); killQuiet(r.child.pid); });
+    await waitFor(() => existsSync(s('ready')), T, 'resume wrote');
+    const n = looks(s('looks.jsonl')).length;
+    await waitFor(() => looks(s('looks.jsonl')).length >= n + 2, T, 'two looks after the resume wrote');
+    touch(s('exit'));
+    expect((await r.done).code).toBe(0);
+    expect(r.err()).toContain(realpathSync(p));
+    onlyEntry(e, 'resumed');
+    const again = await runLens(['import', '--runtime', 'codex', '--json', '--tag', 'agent=imported'], e.env);
+    expect(JSON.parse(again.out)).toMatchObject({ imported: 0 });
+    onlyEntry(e, 'resumed');
+  }, T);
+
+  it('[resume-after-legacy-import] a rollout indexed by an import with no claim is not counted again by a wrapped resume', async () => {
+    const e = freshEnv();
+    const s = (n: string) => join(e.sync, n);
+    const p = closedRollout(e, 'legacy');
+    await runLens(['import', '--runtime', 'codex', '--json', '--tag', 'agent=imported'], e.env);
+    forgetClaim(e, p); // as an import made before import claimed
+    const r = resumeWrapped(e, p, s('ready'), s('exit'));
+    cleanup.push(() => { touch(s('exit')); killQuiet(r.child.pid); });
+    await waitFor(() => existsSync(s('ready')), T, 'resume wrote');
+    await waitFor(() => looks(s('looks.jsonl')).some((l) => l.claimed.length), T, 'resume claimed');
+    touch(s('exit'));
+    expect((await r.done).code).toBe(0);
+    expect(r.err()).toContain(realpathSync(p));
+    onlyEntry(e, 'legacy');
+  }, T);
+
+  it('[resume-after-legacy-import-recover] the same holds when lens recover finalizes the killed resume', async () => {
+    const e = freshEnv();
+    const s = (n: string) => join(e.sync, n);
+    const p = closedRollout(e, 'legacy-rec');
+    await runLens(['import', '--runtime', 'codex', '--json', '--tag', 'agent=imported'], e.env);
+    forgetClaim(e, p);
+    const r = resumeWrapped(e, p, s('ready'), s('exit'));
+    cleanup.push(() => { touch(s('exit')); killQuiet(r.child.pid); });
+    await waitFor(() => existsSync(s('ready')), T, 'resume wrote');
+    await waitFor(() => looks(s('looks.jsonl')).some((l) => l.claimed.length), T, 'resume claimed');
+    const codexPid = Number(readFileSync(s('ready'), 'utf8'));
+    r.child.kill('SIGKILL');
+    await r.done;
+    touch(s('exit'));
+    await waitFor(() => !pidAlive(codexPid), T, 'resumed codex exited');
+    const out = await recover(e);
+    expect(out.code).toBe(0);
+    expect(out.err).toContain(realpathSync(p));
+    onlyEntry(e, 'legacy-rec');
   }, T);
 });
 
