@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { join } from 'node:path';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { constants } from 'node:os';
 import {
-  freshEnv, index, killQuiet, lensRunFake, metaLines, mockUpstream, pidOf, rolloutPath, touch, usageLine, waitFor, claims,
+  freshEnv, index, killQuiet, lensRunFake, metaLines, mockUpstream, pidOf, rolloutPath, touch, usageLine, waitFor, claims, looks,
 } from './helpers/lens.js';
 
 const T = 30000;
@@ -110,6 +110,27 @@ describe('save on pane close or process stop', () => {
     expect(entries).toHaveLength(1);
     expect(entries[0].totals).toMatchObject({ input: 7, output: 3, cacheRead: 11, requests: 1 });
     expect(existsSync(pidfile) && (() => { try { process.kill(pidOf(pidfile), 0); return true; } catch { return false; } })()).toBe(true);
+  }, T);
+  it('ALF-4 [slow-evidence] slow open-file lookups do not stretch a logs-mode stop past grace + 1 s', async () => {
+    const e = claudeEnv();
+    const slow = join(e.sync, 'lsof');
+    writeFileSync(slow, '#!/bin/sh\nsleep 1.5\nexec lsof "$@"\n', { mode: 0o755 });
+    const p = rolloutPath(e, 'slow'); const ready = join(e.sync, 'ready'); const pf = join(e.sync, 'pid'); const lk = join(e.sync, 'looks.jsonl');
+    const r = lensRunFake(e, 'codex', [
+      { open: p }, { write: p, lines: [...metaLines('slow', e.cwd), usageLine({ input: 600, cached: 0, output: 60 })] },
+      { touch: ready }, { forever: true },
+    ], { AGENTLENS_LSOF: slow, AGENTLENS_TEST_LOOK_LOG: lk, FAKE_IGNORE_SIGNALS: '1', FAKE_PIDFILE: pf });
+    cleanup.push(() => { killQuiet(r.child.pid); if (existsSync(pf)) killQuiet(pidOf(pf)); });
+    await waitFor(() => existsSync(ready), T, 'fake codex ready');
+    await waitFor(() => looks(lk).some((l) => l.claimed.length > 0), T, 'rollout claimed');
+    const sent = Date.now();
+    process.kill(r.child.pid!, 'SIGTERM');
+    const done = await r.done;
+    expect(done.at - sent).toBeLessThan(GRACE + 1000);
+    expect(done.code).toBe(status('SIGTERM'));
+    const entries = index(e.home);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].totals).toMatchObject({ input: 600, output: 60, requests: 1 });
   }, T);
 });
 

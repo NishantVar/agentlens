@@ -8,7 +8,7 @@
 //      full now (temp file + rename, so a re-run gives the same result).
 //   4. meta: endedAt, exitCode, recovered, nativeSessionIds.
 //   5. append the index line: the commit point.
-import { appendFileSync, existsSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { parseRollout, rolloutNativeSessionId } from './codexRollout.js';
@@ -47,6 +47,21 @@ function readLines<T>(path: string): T[] {
 
 export function indexedIds(root: string): Set<string> {
   return new Set(readLines<IndexEntry>(join(root, 'index.jsonl')).map((e) => e.id));
+}
+
+// A short write (e.g. a full disk) can leave the index without its final
+// newline. Appending straight after it would merge the new entry into that
+// unreadable line, so start the entry on a fresh line.
+function appendIndexLine(path: string, line: string): void {
+  let torn = false;
+  if (existsSync(path)) {
+    const fd = openSync(path, 'r');
+    try {
+      const size = fstatSync(fd).size;
+      if (size > 0) { const b = Buffer.alloc(1); readSync(fd, b, 0, 1, size - 1); torn = b[0] !== 10; }
+    } finally { closeSync(fd); }
+  }
+  appendFileSync(path, (torn ? '\n' : '') + line + '\n');
 }
 
 const TICKET = /^final\.(\d+)\.json$/;
@@ -115,6 +130,6 @@ export function finalizeSession(root: string, id: string, o: FinalizeOpts): Inde
     nativeSessionIds,
     ...(o.recovered ? { recovered: true as const } : {}),
   };
-  appendFileSync(join(root, 'index.jsonl'), JSON.stringify(entry) + '\n');
+  appendIndexLine(join(root, 'index.jsonl'), JSON.stringify(entry));
   return entry;
 }

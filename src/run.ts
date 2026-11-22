@@ -17,6 +17,13 @@ type Sig = typeof SIGNALS[number];
 // same signal from its process group can exit on its own first.
 const FORWARD_SETTLE_MS = 200;
 const graceMs = () => Number(process.env.AGENTLENS_SIGNAL_GRACE_MS) || 3000;
+// Open-file lookups can be slow (ps and lsof each time out at 2 s), so after a
+// signal they never hold the stop: the signal look gets until this long after
+// the signal before forwarding, and the exit look until this long after the
+// grace deadline. A look still running then is abandoned and claims nothing.
+const SIGNAL_LOOK_CAP_MS = 500;
+const EXIT_LOOK_SLACK_MS = 400;
+const until = (t: number) => new Promise<void>((r) => setTimeout(r, Math.max(0, t - Date.now())));
 const signo = (s: string) => (constants.signals as Record<string, number>)[s] ?? 0;
 
 export interface RunOptions {
@@ -70,11 +77,14 @@ export function lensRun(opts: RunOptions): Promise<number> {
     const setup = async (): Promise<Record<string, string>> => {
       const tags = resolveTags(opts.tags, process.env.AGENTLENS_TAGS);
       const self = identityOf(process.pid);
-      if (!self?.startTime) log('agentlens: cannot read own process identity; an unsaved session falls back to the one-hour idle rule');
+      if (!self?.startTime) log('agentlens: cannot read own process start time; if this session is left unsaved, recovery waits until this process id is gone');
       meta = {
         id: newSessionId(), runtime, capture: adapter.mode, tags, cwd: process.cwd(), argv: opts.argv,
         lensVersion: LENS_VERSION, startedAt: startedAt.toISOString(),
-        ...(self?.startTime ? { wrapper: { pid: self.pid, startTime: self.startTime } } : {}),
+        // Always recorded: without it, recovery would take a live session for a
+        // pre-change one. A null start time makes liveness 'unknown' while the
+        // pid exists, so recovery waits for the pid to go.
+        wrapper: { pid: process.pid, startTime: self?.startTime ?? null },
       };
       writer = new SessionWriter(root, meta);
       if (adapter.mode !== 'proxy') return {};
@@ -94,11 +104,15 @@ export function lensRun(opts: RunOptions): Promise<number> {
       return proxyAdapter.env(proxy.origin);
     };
 
-    const finish = async (code: number) => {
+    const finish = async (code: number, lookBy?: number) => {
       if (finishing) return;
       finishing = true;
       try {
-        if (looker) { await looker.look('exit'); looker.stop(); }
+        if (looker) {
+          const last = looker.look('exit');
+          await (lookBy === undefined ? last : Promise.race([last, until(lookBy)]));
+          looker.stop();
+        }
         if (writer && meta) {
           const entry = finalizeSession(root, writer.id, {
             exitCode: code, role: 'writer', meta, log,
@@ -127,17 +141,18 @@ export function lensRun(opts: RunOptions): Promise<number> {
     const onSignal = (s: Sig) => {
       if (signalled || finishing) return;
       signalled = s;
+      const t0 = Date.now();
+      const deadline = t0 + graceMs();
+      const exited = new Promise<void>((r) => { onChildExit = r; });
       void (async () => {
-        if (looker) await looker.look('signal');
-        if (!childExit) await new Promise((r) => setTimeout(r, FORWARD_SETTLE_MS));
+        // Look while the agent still holds its rollouts, bounded so that a slow
+        // lookup cannot delay the forward or the deadline.
+        const look = looker ? looker.look('signal') : Promise.resolve();
+        if (!childExit) await Promise.race([exited, until(t0 + FORWARD_SETTLE_MS)]);
+        if (!childExit) await Promise.race([exited, look, until(t0 + SIGNAL_LOOK_CAP_MS)]);
         if (!childExit && child?.pid) { try { child.kill(s); } catch { /* already gone */ } }
-        if (!childExit) {
-          await new Promise<void>((r) => {
-            const t = setTimeout(r, graceMs());
-            onChildExit = () => { clearTimeout(t); r(); };
-          });
-        }
-        await finish(childStatus(s));
+        if (!childExit) await Promise.race([exited, until(deadline)]);
+        await finish(childStatus(s), deadline + EXIT_LOOK_SLACK_MS);
       })();
     };
 

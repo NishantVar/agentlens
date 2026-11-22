@@ -5,7 +5,7 @@
 import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-export type HookPoint = 'claim:before-link' | 'finalize:after-ticket' | 'finalize:after-partial-events' | 'recover:after-gate';
+export type HookPoint = 'claim:before-link' | 'finalize:after-ticket' | 'finalize:after-partial-events' | 'recover:before-gate' | 'recover:after-gate';
 
 const nap = new Int32Array(new SharedArrayBuffer(4));
 

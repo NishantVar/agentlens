@@ -164,6 +164,7 @@ export class Looker {
       pids.add(this.rootPid);
     }
     const ev = await writersOf([...pids], this.rootReal);
+    if (this.stopped) return; // finished after the session was finalized: claim nothing
     if (!ev.ok) {
       if (!this.reported) { this.reported = true; this.log(`agentlens: cannot read open-file evidence (${ev.reason}); no Codex rollout claimed`); }
     } else {

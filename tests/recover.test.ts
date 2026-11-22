@@ -1,13 +1,13 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, utimesSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, utimesSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { StoreReader } from '../src/store.js';
 import { startDashboard } from '../src/dashboard.js';
 import type { ProcIdentity } from '../src/procinfo.js';
 import {
   claims, deadIdentity, eventLines, freshEnv, index, killQuiet, lensRunFake, liveSleeper, looks, metaLines, mockUpstream,
-  rolloutPath, runLens, sessionIds, spawnLens, tmp, touch, usageLine, waitFor, type Env,
+  pidAlive, pidOf, rolloutPath, runLens, sessionIds, spawnLens, tmp, touch, usageLine, waitFor, type Env,
 } from './helpers/lens.js';
 
 const T = 60000;
@@ -309,5 +309,79 @@ describe('lens import respects claims (plan §2.9)', () => {
     const entries = index(e.home);
     expect(entries).toHaveLength(1);
     expect(entries[0].nativeSessionIds).toEqual(['free']);
+  }, T);
+});
+
+describe('review 3: recovery races and damage', () => {
+  it('ALF-12 [late-claim] a claim published after the sweep began, by a wrapper that then died, is not frozen out', async () => {
+    const e = freshEnv();
+    const W = await liveSleeper(); const H = await liveSleeper();
+    cleanup.push(() => { W.stop(); H.stop(); });
+    const id = 'late-claim-session';
+    writeSession(e.home, { id, runtime: 'codex', wrapper: W.id, cwd: e.cwd });
+    const p = rolloutPath(e, 'late');
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, [...metaLines('late', e.cwd), usageLine({ input: 400, cached: 0, output: 40 })].map((l) => l + '\n').join(''));
+    const rec = spawnLens(['recover'], { ...e.env, AGENTLENS_TEST_HOOKS: `recover:before-gate=pause:${e.sync}` });
+    await waitFor(() => readdirSync(e.sync).some((f) => f.startsWith('recover:before-gate.') && f.endsWith('.reached')), T, 'sweep paused');
+    const real = realpathSync(p);
+    mkdirSync(join(e.home, 'claims'), { recursive: true });
+    writeFileSync(join(e.home, 'claims', claimHash(real) + '.json'), JSON.stringify({ rollout: real, session: id, holders: [H.id], claimedAt: new Date().toISOString() }));
+    W.stop();
+    await waitFor(() => !pidAlive(W.id.pid), T, 'wrapper gone');
+    touch(join(e.sync, 'recover:before-gate.release'));
+    expect((await rec.done).code).toBe(0);
+    expect(index(e.home)).toHaveLength(0); // the late claim's holder still lives
+    H.stop();
+    await waitFor(() => !pidAlive(H.id.pid), T, 'holder gone');
+    expect((await recover(e)).code).toBe(0);
+    const entries = index(e.home);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ id, recovered: true, exitCode: null });
+    expect(entries[0].totals).toMatchObject({ input: 400, output: 40, requests: 1 });
+  }, T);
+
+  it('ALF-37 [torn-index] a torn index tail does not swallow the next finalized session', async () => {
+    const e = freshEnv();
+    finalizedSession(e.home, 'older', { input: 5, output: 1 });
+    writeFileSync(join(e.home, 'index.jsonl'), '{"id":"torn","runtime":"cla', { flag: 'a' });
+    writeSession(e.home, { id: 'next', wrapper: await deadIdentity(), usages: [{ input: 70, output: 7 }] });
+    const first = await recover(e);
+    expect(first.code).toBe(0);
+    expect(first.out).toContain('recovered 1');
+    expect(new StoreReader(e.home).listIndex().map((r) => r.id)).toEqual(['older', 'next']); // readable at once
+    expect((await recover(e)).code).toBe(0);
+    const rows = new StoreReader(e.home).listIndex();
+    expect(rows.map((r) => r.id)).toEqual(['older', 'next']);
+    expect(rows[0].totals).toMatchObject({ input: 5, output: 1 });
+    expect(rows[1].totals).toMatchObject({ input: 70, output: 7, requests: 1 });
+  }, T);
+
+  it('ALF-7 [no-wrapper-identity] a live session whose wrapper identity could not be read is not taken for legacy', async () => {
+    const e = freshEnv();
+    const ps = join(e.sync, 'ps');
+    writeFileSync(ps, '#!/bin/sh\ncase " $* " in *" -A "*) exec /bin/ps "$@";; esac\nexit 1\n', { mode: 0o755 });
+    const s = (n: string) => join(e.sync, n);
+    const p = rolloutPath(e, 'noid');
+    const r = lensRunFake(e, 'codex', [
+      { open: p }, { write: p, lines: [...metaLines('noid', e.cwd), usageLine({ input: 900, cached: 0, output: 90 })] },
+      { touch: s('ready') }, { wait: s('exit') },
+    ], { AGENTLENS_PS: ps, AGENTLENS_TEST_LOOK_LOG: s('looks.jsonl'), FAKE_PIDFILE: s('pid') });
+    cleanup.push(() => { touch(s('exit')); killQuiet(r.child.pid); if (existsSync(s('pid'))) killQuiet(pidOf(s('pid'))); });
+    await waitFor(() => existsSync(s('ready')), T, 'fake codex ready');
+    await waitFor(() => looks(s('looks.jsonl')).some((l) => l.claimed.length > 0), T, 'rollout claimed');
+    r.child.kill('SIGKILL');
+    await r.done;
+    const [id] = sessionIds(e.home);
+    ageTree(join(e.home, 'sessions', id), 2 * 60 * 60 * 1000);
+    expect((await recover(e)).code).toBe(0);
+    expect(index(e.home)).toHaveLength(0); // the agent still holds its rollout
+    touch(s('exit'));
+    await waitFor(() => !pidAlive(pidOf(s('pid'))), T, 'agent exit');
+    expect((await recover(e)).code).toBe(0);
+    const entries = index(e.home);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ id, recovered: true, exitCode: null });
+    expect(entries[0].totals).toMatchObject({ input: 900, output: 90, requests: 1 });
   }, T);
 });

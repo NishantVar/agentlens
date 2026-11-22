@@ -3,7 +3,7 @@
 // /api/data; never from `run`, `import` or `compact`. Fail-open throughout.
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { claimsOf, listClaims, nameUnclaimed, readHolders } from './claims.js';
+import { claimsOf, listClaims, nameUnclaimed, readHolders, type ClaimRecord } from './claims.js';
 import { finalizeSession, indexedIds } from './finalize.js';
 import { liveness, type ProcIdentity } from './procinfo.js';
 import { storeRoot } from './store.js';
@@ -32,17 +32,25 @@ export function sweepStore(root: string = storeRoot(), o: SweepOpts = {}): Sweep
     const indexed = indexedIds(root);
     const candidates = readdirSync(sessions).filter((id) => !indexed.has(id));
     if (!candidates.length) return sum;
-    const allClaims = listClaims(root);
     const now = o.now ?? Date.now();
     for (const id of candidates) {
       try {
+        hook('recover:before-gate');
         const dir = join(sessions, id);
         const meta: SessionMeta = JSON.parse(readFileSync(join(dir, 'meta.json'), 'utf8'));
-        const mine = claimsOf(allClaims, id);
         let eligible: boolean;
+        let allClaims: ClaimRecord[] = [];
+        let mine: ClaimRecord[] = [];
         if (meta.wrapper) {
-          const holders: ProcIdentity[] = [meta.wrapper, ...mine.flatMap((c) => c.holders), ...readHolders(root, id)];
-          eligible = holders.every((h) => liveness(h) === 'gone');
+          // Only the wrapper publishes this session's claims and holders, so
+          // they are read after it is known gone: then the set is final.
+          eligible = liveness(meta.wrapper) === 'gone';
+          if (eligible) {
+            allClaims = listClaims(root);
+            mine = claimsOf(allClaims, id);
+            const holders: ProcIdentity[] = [...mine.flatMap((c) => c.holders), ...readHolders(root, id)];
+            eligible = holders.every((h) => liveness(h) === 'gone');
+          }
         } else {
           eligible = now - newestMtime(dir) >= LEGACY_IDLE_MS; // legacy: no identity recorded
         }

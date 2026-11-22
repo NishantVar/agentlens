@@ -26,7 +26,7 @@ export interface SessionMeta {
   endedAt?: string;
   exitCode?: number | null;     // null: recovered, the child's status is unknown
   recovered?: true;             // finalized by a recovery sweep, not its own wrapper
-  wrapper?: { pid: number; startTime: string };  // the `lens run` process, for liveness
+  wrapper?: { pid: number; startTime: string | null };  // the `lens run` process, for liveness (null start: ps failed)
   nativeSessionIds?: string[];  // native ids of the underlying CLI session(s)
   source?: { kind: 'import'; path: string };
 }
