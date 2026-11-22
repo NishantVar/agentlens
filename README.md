@@ -16,8 +16,11 @@ npm link      # puts `lens` on your PATH
 `npm run build` also records the git commit it was built from. `lens --version`
 prints `<version> <commit>`, for example `0.1.0 c62a7c5…` (the full 40-character
 commit), wherever it is run from and even after the checkout moves on. It prints
-`unknown` for the commit when the build was made outside a git checkout, or when
-the last build failed or was stopped before it finished; rebuild to fix that.
+`unknown` for the commit when the build was made outside a git checkout, from
+uncommitted changes to `src/`, `tsconfig.json` or `package.json`, or when the last
+build failed or was stopped before it finished; commit and rebuild to fix that.
+A clean checkout is compiled from a copy of its commit's sources, so the recorded
+commit is the one compiled even if the checkout changes during the build.
 
 Requires Node >= 20 and the agent CLI you want to observe (`claude` and/or
 `codex`) installed and authenticated on the same machine.

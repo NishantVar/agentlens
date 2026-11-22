@@ -118,38 +118,83 @@ describe('ALF-16 build identity', () => {
     expect(before).toBe(`${VERSION} ${head}`);
     expect(versionVia(dir, other)).toBe(`${VERSION} unknown`);
   }, T);
-  it('ALF-16 [head-moved-during-build] a checkout move while the build is under way never stamps the new commit', async () => {
-    const { dir, head } = checkoutCopy(true);
-    // A compiler that runs the real tsc, then waits at a gate before reporting
-    // success: the checkout moves while the build's output is from the old commit.
+  // A compiler that waits at `started` before running the real tsc and at
+  // `emitted` after it, so the test can change the checkout while the build runs.
+  function gatedCompiler(dir: string) {
     const gate = tmp('agentlens-gate-');
     rmSync(join(dir, 'node_modules'));
     mkdirSync(join(dir, 'node_modules'));
     for (const name of readdirSync(join(REPO, 'node_modules'))) if (name !== 'typescript') symlinkSync(join(REPO, 'node_modules', name), join(dir, 'node_modules', name));
     mkdirSync(join(dir, 'node_modules', 'typescript', 'bin'), { recursive: true });
     writeFileSync(join(dir, 'node_modules', 'typescript', 'package.json'), JSON.stringify({ name: 'typescript', version: '0.0.0' }));
+    const g = (f: string) => JSON.stringify(join(gate, f));
     writeFileSync(join(dir, 'node_modules', 'typescript', 'bin', 'tsc'), [
       "const { spawnSync } = require('node:child_process'); const fs = require('node:fs');",
+      `const wait = (f) => { while (!fs.existsSync(f)) spawnSync('sleep', ['0.05']); };`,
+      `fs.writeFileSync(${g('started')}, ''); wait(${g('go-compile')});`,
       `const r = spawnSync(process.execPath, [${JSON.stringify(join(REPO, 'node_modules', 'typescript', 'bin', 'tsc'))}, ...process.argv.slice(2)], { stdio: 'inherit' });`,
-      `fs.writeFileSync(${JSON.stringify(join(gate, 'emitted'))}, '');`,
-      `while (!fs.existsSync(${JSON.stringify(join(gate, 'go'))})) spawnSync('sleep', ['0.05']);`,
+      `fs.writeFileSync(${g('emitted')}, ''); wait(${g('go-exit')});`,
       'process.exit(r.status ?? 1);',
     ].join('\n'));
     const p = spawn('npm', ['run', 'build', '--silent'], { cwd: dir, stdio: 'ignore' });
     const exited = new Promise<number | null>((r) => p.on('exit', (code) => r(code)));
-    const t0 = Date.now();
-    while (!existsSync(join(gate, 'emitted')) && Date.now() - t0 < 90_000) await new Promise((r) => setTimeout(r, 20));
-    expect(existsSync(join(gate, 'emitted')), 'compiler never reached the gate').toBe(true);
-    // the checkout moves to a commit whose sources the build did not compile
+    const at = async (f: string) => {
+      const t0 = Date.now();
+      while (!existsSync(join(gate, f)) && Date.now() - t0 < 90_000) await new Promise((r) => setTimeout(r, 20));
+      expect(existsSync(join(gate, f)), `compiler never reached ${f}`).toBe(true);
+    };
+    const open = (f: string) => writeFileSync(join(gate, f), '');
+    return { exited, at, open };
+  }
+  // A later commit adds src/later.ts; output built from it has dist/later.js.
+  const commitLater = (dir: string) => {
     writeFileSync(join(dir, 'src', 'later.ts'), 'export const later = 1;\n');
     git(dir, 'add', '-A'); git(dir, 'commit', '-q', '-m', 'later');
-    const moved = git(dir, 'rev-parse', 'HEAD');
+    return git(dir, 'rev-parse', 'HEAD');
+  };
+  // The advertised commit supplied the compiled sources, or the commit is unknown.
+  function expectHonest(dir: string, head: string, out: string) {
+    const fromLater = existsSync(join(dir, 'dist', 'later.js'));
+    expect([`${VERSION} ${head}`, `${VERSION} unknown`]).toContain(out);
+    if (fromLater) expect(out, 'output compiled from the later commit is advertised as the first').toBe(`${VERSION} unknown`);
+  }
+
+  it('ALF-16 [head-moved-during-build] a checkout move while the build is under way never stamps the new commit', async () => {
+    const { dir, head } = checkoutCopy(true);
+    const c = gatedCompiler(dir);
+    await c.at('started'); c.open('go-compile');
+    await c.at('emitted');
+    const moved = commitLater(dir); // the checkout moves after the compiler read its sources
     expect(moved).not.toBe(head);
-    writeFileSync(join(gate, 'go'), '');
-    expect(await exited).toBe(0);
-    expect(existsSync(join(dir, 'dist', 'later.js'))).toBe(false);
+    c.open('go-exit');
+    expect(await c.exited).toBe(0);
     const out = versionVia(dir, other);
     expect(out).not.toContain(moved);
-    expect(out).toBe(`${VERSION} unknown`);
+    expectHonest(dir, head!, out);
+  }, T);
+
+  it('ALF-16 [head-round-trip-during-build] sources from another commit compiled between two matching HEAD samples are never advertised as the first commit', async () => {
+    const { dir, head } = checkoutCopy(true);
+    const c = gatedCompiler(dir);
+    await c.at('started');
+    const moved = commitLater(dir); // the checkout is at B while the compiler reads
+    c.open('go-compile');
+    await c.at('emitted');
+    git(dir, 'reset', '-q', '--hard', head!); // and back at A before the build finishes
+    expect(git(dir, 'rev-parse', 'HEAD')).toBe(head);
+    c.open('go-exit');
+    expect(await c.exited).toBe(0);
+    const out = versionVia(dir, other);
+    expect(out).not.toContain(moved);
+    expectHonest(dir, head!, out);
+  }, T);
+
+  it('ALF-16 [uncommitted-source] a build of uncommitted source edits compiles them and prints unknown', () => {
+    const { dir } = checkoutCopy(true);
+    writeFileSync(join(dir, 'src', 'later.ts'), 'export const later = 1;\n');
+    const b = build(dir);
+    expect(b.status, b.stderr).toBe(0);
+    expect(existsSync(join(dir, 'dist', 'later.js'))).toBe(true);
+    expect(versionVia(dir, other)).toBe(`${VERSION} unknown`);
   }, T);
 });
