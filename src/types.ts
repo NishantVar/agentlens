@@ -2,7 +2,8 @@ export interface Usage {
   input: number;      // uncached input tokens
   output: number;
   cacheRead: number;
-  cacheWrite: number;
+  cacheWrite: number;          // all cache writes
+  cacheWriteLong?: number;     // the part of cacheWrite at the longer duration (Claude 1h); absent: none known
   reasoning: number;  // informational; subset of output for OpenAI
 }
 export const emptyUsage = (): Usage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 });
@@ -10,6 +11,7 @@ export const addUsage = (a: Usage, b: Usage): Usage => ({
   input: a.input + b.input, output: a.output + b.output,
   cacheRead: a.cacheRead + b.cacheRead, cacheWrite: a.cacheWrite + b.cacheWrite,
   reasoning: a.reasoning + b.reasoning,
+  ...(a.cacheWriteLong !== undefined || b.cacheWriteLong !== undefined ? { cacheWriteLong: (a.cacheWriteLong ?? 0) + (b.cacheWriteLong ?? 0) } : {}),
 });
 
 export type Runtime = 'claude' | 'codex';

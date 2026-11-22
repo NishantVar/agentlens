@@ -6,7 +6,7 @@
   "bin": { "lens": "dist/cli.js" },
   "engines": { "node": ">=20" },
   "scripts": {
-    "build": "tsc",
+    "build": "node scripts/build.mjs",
     "test": "vitest run"
   },
   "dependencies": { "commander": "^12.1.0" },

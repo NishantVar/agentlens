@@ -2,6 +2,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { NormalizedEvent, Usage } from './types.js';
+import { anthropicWriteLong } from './normalize.js';
 
 type Any = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 const n = (v: unknown): number => (typeof v === 'number' ? v : 0);
@@ -33,7 +34,7 @@ export function parseClaudeTranscript(jsonlText: string): ParsedTranscript {
     byRequest.set(d.requestId, {
       ts: typeof d.timestamp === 'string' ? d.timestamp : '',
       model: typeof d.message?.model === 'string' ? d.message.model : 'unknown',
-      usage: { input: n(u.input_tokens), output: n(u.output_tokens), cacheRead: n(u.cache_read_input_tokens), cacheWrite: n(u.cache_creation_input_tokens), reasoning: 0 },
+      usage: { input: n(u.input_tokens), output: n(u.output_tokens), cacheRead: n(u.cache_read_input_tokens), cacheWrite: n(u.cache_creation_input_tokens), reasoning: 0, ...anthropicWriteLong(u) },
     });
   }
   const events = [...byRequest.values()].map((e, i): NormalizedEvent => ({
