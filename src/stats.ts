@@ -68,7 +68,7 @@ export function sessionsCommand(opts: SessionsOptions, reader: StoreReader = new
       Object.entries(e.tags).map(([k, v]) => `${k}=${v}`).join(' ') || '-',
       String(e.totals.requests),
       fmtTokens(e.totals.input + e.totals.output + e.totals.cacheRead + e.totals.cacheWrite),
-      String(e.exitCode),
+      e.exitCode === null ? 'unknown' : String(e.exitCode),
     ]),
   );
 }

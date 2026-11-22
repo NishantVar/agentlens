@@ -2,7 +2,7 @@ import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, 
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { addUsage, emptyUsage } from './types.js';
+import { finalizeSession } from './finalize.js';
 import { packBody, unpackBody } from './blobs.js';
 import type { IndexEntry, NormalizedEvent, RawPair, SessionMeta } from './types.js';
 
@@ -110,29 +110,19 @@ export class SessionWriter {
     this.ensureDir();
     appendFileSync(join(this.dir, 'events.jsonl'), JSON.stringify(ev) + '\n');
   }
-  finalize(exitCode: number, extra?: { endedAt?: string; nativeSessionIds?: string[] }): IndexEntry {
-    const endedAt = extra?.endedAt ?? new Date().toISOString();
-    const nativeSessionIds = extra?.nativeSessionIds ?? this.meta.nativeSessionIds;
-    this.meta = { ...this.meta, endedAt, exitCode, nativeSessionIds };
+  finalize(exitCode: number | null, extra?: { endedAt?: string; nativeSessionIds?: string[] }): IndexEntry {
     this.ensureDir();
-    writeFileSync(join(this.dir, 'meta.json'), JSON.stringify(this.meta, null, 2));
-    const events = readJsonl<NormalizedEvent>(join(this.dir, 'events.jsonl'));
-    let totals = emptyUsage();
-    const models = new Set<string>();
-    for (const e of events) { totals = addUsage(totals, e.usage); models.add(e.model); }
-    const entry: IndexEntry = {
-      id: this.id, runtime: this.meta.runtime, tags: this.meta.tags,
-      models: [...models], startedAt: this.meta.startedAt, endedAt, exitCode,
-      totals: { ...totals, requests: events.length },
-      nativeSessionIds,
-    };
-    appendFileSync(join(this.root, 'index.jsonl'), JSON.stringify(entry) + '\n');
+    const entry = finalizeSession(this.root, this.id, {
+      exitCode, role: 'writer', endedAt: extra?.endedAt, nativeSessionIds: extra?.nativeSessionIds, meta: this.meta,
+    });
+    if (!entry) throw new Error(`session ${this.id} was already finalized`);
+    this.meta = { ...this.meta, endedAt: entry.endedAt, exitCode, nativeSessionIds: entry.nativeSessionIds };
     return entry;
   }
 }
 
 export class StoreReader {
-  constructor(private root: string = storeRoot()) {}
+  constructor(readonly root: string = storeRoot()) {}
   listIndex(): IndexEntry[] { return readJsonl<IndexEntry>(join(this.root, 'index.jsonl')); }
   readMeta(id: string): SessionMeta {
     return JSON.parse(readFileSync(join(this.root, 'sessions', id, 'meta.json'), 'utf8'));

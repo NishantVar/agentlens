@@ -1,6 +1,7 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { StoreReader } from './store.js';
+import { sweepStore } from './recover.js';
 import { filterIndex, groupBy, parseSince } from './query.js';
 import { costUsd, loadPricing, priceFor, type ModelPrice } from './pricing.js';
 import { addUsage, emptyUsage } from './types.js';
@@ -39,6 +40,7 @@ export function startDashboard(port = 4040, reader: StoreReader = new StoreReade
     const url = new URL(req.url ?? '/', 'http://x');
     if (url.pathname === '/api/data') {
       try {
+        sweepStore(reader.root);
         const run = url.searchParams.get('run') ?? undefined;
         let since: Date | undefined;
         try { since = parseSince(url.searchParams.get('since') ?? ''); } catch { since = undefined; }

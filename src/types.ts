@@ -24,7 +24,9 @@ export interface SessionMeta {
   lensVersion: string;
   startedAt: string;     // ISO 8601
   endedAt?: string;
-  exitCode?: number;
+  exitCode?: number | null;     // null: recovered, the child's status is unknown
+  recovered?: true;             // finalized by a recovery sweep, not its own wrapper
+  wrapper?: { pid: number; startTime: string | null };  // the `lens run` process, for liveness (null start: ps failed)
   nativeSessionIds?: string[];  // native ids of the underlying CLI session(s)
   source?: { kind: 'import'; path: string };
 }
@@ -56,7 +58,8 @@ export interface IndexEntry {
   models: string[];
   startedAt: string;
   endedAt: string;
-  exitCode: number;
+  exitCode: number | null;  // null only on a recovered entry
   totals: SessionTotals;
   nativeSessionIds?: string[];
+  recovered?: true;
 }

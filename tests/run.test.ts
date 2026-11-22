@@ -7,6 +7,7 @@ import type { AddressInfo } from 'node:net';
 import { lensRun } from '../src/run.js';
 import { StoreReader } from '../src/store.js';
 import { rolloutFixture } from './fixtures/codexRollout.js';
+import { claims, touch, waitFor } from './helpers/lens.js';
 
 // Mock "Anthropic API"
 const upstream = http.createServer((req, res) => {
@@ -29,14 +30,17 @@ writeFileSync(join(binDir, 'claude'), `#!/usr/bin/env node
 })();
 `, { mode: 0o755 });
 
-// Fake "codex" CLI: writes a rollout file into $AGENTLENS_CODEX_SESSIONS (simulating codex's native session logging)
+// Fake "codex" CLI: writes a rollout file into $AGENTLENS_CODEX_SESSIONS and holds
+// it open for writing while it runs, as codex's native session logging does. It
+// exits once $FAKE_GATE exists (the test creates it after the claim is recorded).
 writeFileSync(join(binDir, 'codex'), `#!/usr/bin/env node
-const { mkdirSync, writeFileSync } = require('node:fs');
+const { mkdirSync, openSync, writeSync, existsSync } = require('node:fs');
 const { join } = require('node:path');
 const day = join(process.env.AGENTLENS_CODEX_SESSIONS, '2026', '07', '14');
 mkdirSync(day, { recursive: true });
-writeFileSync(join(day, 'rollout-test.jsonl'), process.env.FAKE_ROLLOUT);
-process.exit(0);
+const fd = openSync(join(day, 'rollout-test.jsonl'), 'a+');
+writeSync(fd, process.env.FAKE_ROLLOUT);
+const t = setInterval(() => { if (!process.env.FAKE_GATE || existsSync(process.env.FAKE_GATE)) { clearInterval(t); process.exit(0); } }, 15);
 `, { mode: 0o755 });
 
 // Fake "claude" that only reports the env it was launched with (capture-marker probe).
@@ -115,9 +119,14 @@ describe('lensRun', () => {
     const sessionsRoot = mkdtempSync(join(tmpdir(), 'codex-sessions-'));
     process.env.AGENTLENS_CODEX_SESSIONS = sessionsRoot;
     process.env.FAKE_ROLLOUT = rolloutFixture(process.cwd());
-    const code = await lensRun({ tags: ['agent=codex-e2e'], argv: [join(binDir, 'codex')] });
+    process.env.FAKE_GATE = join(home, 'gate');
+    const running = lensRun({ tags: ['agent=codex-e2e'], argv: [join(binDir, 'codex')] });
+    await waitFor(() => claims(home).length > 0, 15000, 'rollout claim');
+    touch(process.env.FAKE_GATE);
+    const code = await running;
     delete process.env.AGENTLENS_CODEX_SESSIONS;
     delete process.env.FAKE_ROLLOUT;
+    delete process.env.FAKE_GATE;
     expect(code).toBe(0);
     const r = new StoreReader(home);
     const [entry] = r.listIndex();
