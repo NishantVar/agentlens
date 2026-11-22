@@ -33,8 +33,10 @@ export interface FinalizeOpts {
 }
 
 // A claimed rollout read up to its last complete line ahead of finalize: the
-// bytes so far are already in a temp copy and already scanned.
-export interface PreparedRollout { offset: number; scan: RolloutScan; tmp: string }
+// bytes so far are already in a temp copy and already scanned. Finalize continues
+// from them only if the path is still the same file (dev, ino) and still starts
+// with exactly these bytes; otherwise it reads the current file in full.
+export interface PreparedRollout { offset: number; scan: RolloutScan; tmp: string; dev: number; ino: number; prefix: Buffer }
 export type Prepared = Map<string, PreparedRollout>;
 
 /** Read this session's claimed rollouts so far, adding to `prepared`; fail-open. */
@@ -43,26 +45,37 @@ export function prepareClaims(root: string, id: string, prepared: Prepared = new
     const dir = join(root, 'sessions', id);
     for (const c of claimsOf(listClaims(root), id)) {
       if (prepared.has(c.rollout)) continue;
+      let tmp: string | undefined;
       try {
-        const buf = readFileSync(c.rollout);
+        const fd = openSync(c.rollout, 'r');
+        let buf: Buffer; let st: ReturnType<typeof fstatSync>;
+        try { st = fstatSync(fd); buf = readFileSync(fd); } finally { closeSync(fd); }
         const prefix = buf.subarray(0, buf.lastIndexOf(0x0a) + 1);
-        const tmp = join(dir, `rollout-prepared.${process.pid}.${randomBytes(4).toString('hex')}.tmp`);
+        tmp = join(dir, `rollout-prepared.${process.pid}.${randomBytes(4).toString('hex')}.tmp`);
         writeFileSync(tmp, prefix);
-        prepared.set(c.rollout, { offset: prefix.length, scan: scanRollout(prefix.toString('utf8')), tmp });
-      } catch { /* finalize reads it in full */ }
+        hook('finalize:after-prepare-temp');
+        prepared.set(c.rollout, { offset: prefix.length, scan: scanRollout(prefix.toString('utf8')), tmp, dev: st.dev, ino: st.ino, prefix });
+      } catch {
+        // finalize reads it in full; a temp copy made before the failure goes now
+        if (tmp) try { rmSync(tmp, { force: true }); } catch { /* best effort */ }
+      }
     }
   } catch { /* finalize reads them in full */ }
   return prepared;
 }
 
-function readFrom(path: string, offset: number): Buffer | null {
+// The bytes after the prepared prefix, or null when the path no longer holds
+// that prefix (replaced, truncated or rewritten): then start over.
+function readFrom(path: string, p: PreparedRollout): Buffer | null {
   const fd = openSync(path, 'r');
   try {
-    const size = fstatSync(fd).size;
-    if (size < offset) return null; // truncated or replaced: start over
-    const out = Buffer.alloc(size - offset);
-    for (let got = 0; got < out.length;) { const n = readSync(fd, out, got, out.length - got, offset + got); if (!n) return out.subarray(0, got); got += n; }
-    return out;
+    const st = fstatSync(fd);
+    if (st.dev !== p.dev || st.ino !== p.ino || st.size < p.offset) return null;
+    const all = Buffer.alloc(st.size);
+    let got = 0;
+    while (got < all.length) { const n = readSync(fd, all, got, all.length - got, got); if (!n) break; got += n; }
+    if (got < p.offset || !all.subarray(0, p.offset).equals(p.prefix)) return null;
+    return all.subarray(p.offset, got);
   } finally { closeSync(fd); }
 }
 
@@ -70,7 +83,7 @@ function readFrom(path: string, offset: number): Buffer | null {
 function readClaimed(path: string, p: PreparedRollout | undefined): { scan: RolloutScan; commit: (copy: string) => void } {
   if (p) {
     let tail: Buffer | null | undefined;
-    try { tail = readFrom(path, p.offset); } catch { tail = undefined; }
+    try { tail = readFrom(path, p); } catch { tail = undefined; }
     if (tail === undefined) return { scan: p.scan, commit: (copy) => renameSync(p.tmp, copy) }; // unreadable now: count what was read
     if (tail) {
       appendFileSync(p.tmp, tail);

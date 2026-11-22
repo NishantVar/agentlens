@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { join } from 'node:path';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { constants } from 'node:os';
 import {
@@ -202,6 +202,34 @@ describe('save on pane close or process stop', () => {
     expect(entries).toHaveLength(1);
     expect(entries[0].totals).toMatchObject({ input: 1000, output: 100, requests: 2 });
     expect(r.err().match(/open-file lookup still running at the stop deadline/g)).toHaveLength(1);
+  }, 60000);
+
+  it('ALF-4 [prepare-fails] a read-ahead that fails after creating its temp copy leaves none behind; the entry is saved within grace + 1 s', async () => {
+    const grace = 1000;
+    const e = claudeEnv({ AGENTLENS_SIGNAL_GRACE_MS: String(grace) });
+    const p = rolloutPath(e, 'prep'); const s = (n: string) => join(e.sync, n); const lk = s('looks.jsonl');
+    const hooks = `finalize:after-prepare-temp=pause:${e.sync},finalize:after-prepare-temp=throw`;
+    const r = lensRunFake(e, 'codex', [
+      { open: p }, { write: p, lines: [...metaLines('prep', e.cwd), usageLine({ input: 40, cached: 0, output: 4 })] },
+      { touch: s('ready') }, { forever: true },
+    ], { AGENTLENS_TEST_LOOK_LOG: lk, AGENTLENS_TEST_HOOKS: hooks, FAKE_IGNORE_SIGNALS: '1', FAKE_PIDFILE: s('pid') });
+    cleanup.push(() => { try { chmodSync(p, 0o644); } catch { /* gone */ } killQuiet(r.child.pid); if (existsSync(s('pid'))) killQuiet(pidOf(s('pid'))); });
+    await waitFor(() => existsSync(s('ready')) && looks(lk).some((l) => l.claimed.length > 0), T, 'rollout claimed');
+    const sent = Date.now();
+    process.kill(r.child.pid!, 'SIGTERM');
+    // First read-ahead (after the forward): its temp copy exists, then the rollout
+    // becomes unreadable and the read-ahead throws. The second (at the exit look)
+    // and finalize then cannot read it either.
+    await waitFor(() => readdirSync(e.sync).some((f) => f.startsWith('finalize:after-prepare-temp.') && f.endsWith('.reached')), T, 'read-ahead temp created');
+    chmodSync(p, 0o000);
+    touch(s('finalize:after-prepare-temp.release'));
+    const done = await r.done;
+    expect(done.at - sent).toBeLessThan(grace + 1000);
+    expect(done.code).toBe(status('SIGTERM'));
+    expect(index(e.home)).toHaveLength(1);
+    expect(r.err()).toContain(`agentlens: claimed rollout unreadable, not counted: ${realpathSync(p)}`);
+    const sdir = join(e.home, 'sessions', index(e.home)[0].id);
+    expect(readdirSync(sdir).filter((f) => f.startsWith('rollout-prepared.'))).toEqual([]);
   }, 60000);
 
   it('ALF-39 [late-lookup] a look result that misses the stop deadline is unreadable evidence: nothing claimed, entry saved, reason and rollout on stderr', async () => {

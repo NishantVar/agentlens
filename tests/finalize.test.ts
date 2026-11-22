@@ -1,7 +1,8 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { appendFileSync, chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { finalizeSession, prepareClaims } from '../src/finalize.js';
+import { scanRollout } from '../src/codexRollout.js';
 import { tryClaim } from '../src/claims.js';
 import type { SessionMeta } from '../src/types.js';
 import { metaLines, tmp, usageLine } from './helpers/lens.js';
@@ -58,5 +59,27 @@ describe('finalize with claimed rollouts read ahead', () => {
       expect(entry.totals).toMatchObject({ input: 100, output: 10, requests: 1 });
       expect(readFileSync(join(dir, 'rollout-1.jsonl'), 'utf8')).toBe(before);
     } finally { chmodSync(rollout, 0o644); }
+  });
+
+  it('ALF-2 [rewritten-rollout] a rollout replaced or rewritten after the read-ahead, at least as long, is counted and copied from its current version only', () => {
+    for (const how of ['replaced', 'rewritten in place'] as const) {
+      const { root, id, dir, meta, rollout } = setup();
+      const prepared = prepareClaims(root, id);
+      const offset = readFileSync(rollout).length;
+      const pad = JSON.stringify({ timestamp: new Date().toISOString(), type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'y'.repeat(offset) }] } });
+      const next = [...metaLines('newer', '/fixture'), turn('gpt-newer'), pad, usageLine({ input: 12, cached: 0, output: 0 })].map((l) => l + '\n').join('');
+      expect(next.length).toBeGreaterThanOrEqual(offset);
+      if (how === 'replaced') { writeFileSync(rollout + '.new', next); renameSync(rollout + '.new', rollout); }
+      else writeFileSync(rollout, next);
+      const want = scanRollout(next);
+      const entry = finalizeSession(root, id, { exitCode: 0, role: 'writer', meta, prepared, log: () => {} })!;
+      const totals = want.events.reduce((a, e) => ({ input: a.input + e.usage.input, output: a.output + e.usage.output }), { input: 0, output: 0 });
+      expect(entry.totals, how).toMatchObject({ ...totals, requests: want.events.length });
+      expect(entry.totals.input, how).toBe(12);
+      expect(entry.models.sort(), how).toEqual([...new Set(want.events.map((e) => e.model))].sort());
+      expect(entry.nativeSessionIds, how).toEqual(['newer']);
+      expect(readFileSync(join(dir, 'rollout-1.jsonl'), 'utf8'), how).toBe(next);
+      expect(readdirSync(dir).filter((f) => f.endsWith('.tmp')), how).toEqual([]);
+    }
   });
 });

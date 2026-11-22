@@ -1,11 +1,12 @@
 // Test-only interleaving hooks. Inert unless AGENTLENS_TEST_HOOKS is set, e.g.
 //   AGENTLENS_TEST_HOOKS='finalize:after-ticket=pause:/tmp/sync,recover:after-gate=kill'
 // `pause:<dir>` writes <dir>/<point>.<pid>.reached and blocks until
-// <dir>/<point>.release exists (capped at 30 s); `kill` SIGKILLs this process.
+// <dir>/<point>.release exists (capped at 30 s); `kill` SIGKILLs this process;
+// `throw` throws at that point. Actions for one point run in the order given.
 import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-export type HookPoint = 'claim:before-link' | 'finalize:after-ticket' | 'finalize:after-partial-events' | 'recover:before-gate' | 'recover:after-gate' | 'finalize:before-index-append';
+export type HookPoint = 'claim:before-link' | 'finalize:after-ticket' | 'finalize:after-partial-events' | 'recover:before-gate' | 'recover:after-gate' | 'finalize:before-index-append' | 'finalize:after-prepare-temp';
 
 const nap = new Int32Array(new SharedArrayBuffer(4));
 
@@ -17,6 +18,7 @@ export function hook(point: HookPoint): void {
     if (eq < 0 || part.slice(0, eq).trim() !== point) continue;
     const action = part.slice(eq + 1).trim();
     if (action === 'kill') process.kill(process.pid, 'SIGKILL');
+    if (action === 'throw') throw new Error(`test hook: ${point}`);
     if (action.startsWith('pause:')) {
       const dir = action.slice('pause:'.length);
       writeFileSync(join(dir, `${point}.${process.pid}.reached`), '');
