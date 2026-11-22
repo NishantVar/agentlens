@@ -195,6 +195,9 @@ CLIs expose their model traffic very differently:
   stderr says so and no rollout is counted. After a signal, a look still
   running at the stop deadline (grace plus under a second) counts as evidence
   that could not be read: nothing is claimed from it and stderr says why.
+  A claimed rollout of several hundred MiB can make the stop run past grace +
+  1 s, though its usage is still counted in full. A rollout over about 512 MiB
+  cannot be read, and is named on stderr as uncounted.
 
 ### Adding a runtime
 
