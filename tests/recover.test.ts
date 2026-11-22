@@ -518,6 +518,8 @@ describe('lens import before the first claim (PR #3)', () => {
     expect((await r.done).code).toBe(0);
     expect(r.err()).toContain(realpathSync(p));
     onlyEntry(e, 'legacy');
+    const leftovers = readdirSync(join(e.home, 'sessions')).flatMap((d) => readdirSync(join(e.home, 'sessions', d)).filter((f) => f.startsWith('rollout-prepared.')));
+    expect(leftovers).toEqual([]);
   }, T);
 
   it('[resume-after-legacy-import-recover] the same holds when lens recover finalizes the killed resume', async () => {
@@ -539,6 +541,58 @@ describe('lens import before the first claim (PR #3)', () => {
     expect(out.code).toBe(0);
     expect(out.err).toContain(realpathSync(p));
     onlyEntry(e, 'legacy-rec');
+  }, T);
+  // Review r2: an import interrupted after its claim is restored in full by recover, once.
+  for (const [name, point, lines] of [
+    ['import-interrupted-after-claim', 'import:after-claim', [usageLine({ input: 120, cached: 0, output: 30 })]],
+    ['import-interrupted-mid-events', 'import:after-first-event', [usageLine({ input: 60, cached: 0, output: 10 }), usageLine({ input: 60, cached: 0, output: 20 })]],
+  ] as const) {
+    it(`[${name}] recover counts the interrupted import's rollout once, with its full usage and the import's tags`, async () => {
+      const e = freshEnv();
+      const p = rolloutPath(e, name);
+      mkdirSync(dirname(p), { recursive: true });
+      writeFileSync(p, [...metaLines(name, e.cwd), ...lines].join('\n') + '\n');
+      const imp = (env: NodeJS.ProcessEnv = e.env) => runLens(['import', '--runtime', 'codex', '--json', '--tag', 'agent=imported'], env);
+      const cut = await spawnLens(['import', '--runtime', 'codex', '--json', '--tag', 'agent=imported'], { ...e.env, AGENTLENS_TEST_HOOKS: `${point}=kill` }).done;
+      expect(cut.signal).toBe('SIGKILL');
+      expect(index(e.home)).toHaveLength(0);
+      expect(JSON.parse((await imp()).out)).toMatchObject({ imported: 0 }); // claimed: a retry before recovery skips it
+      for (const id of sessionIds(e.home)) ageTree(join(e.home, 'sessions', id), 2 * 60 * 60 * 1000);
+      const rec = await recover(e);
+      expect(rec.code).toBe(0);
+      expect(rec.out).toMatch(/recovered 1/);
+      const check = () => {
+        const of = index(e.home).filter((x) => x.nativeSessionIds?.includes(name));
+        expect(of).toHaveLength(1);
+        expect(of[0].tags).toEqual({ agent: 'imported' });
+        expect(of[0].totals).toMatchObject({ input: 120, output: 30, requests: lines.length });
+      };
+      check();
+      expect(JSON.parse((await imp()).out)).toMatchObject({ imported: 0 });
+      check();
+    }, T);
+  }
+
+  it('[import-tree-unreadable] an unreadable remembered tree for a verified wrapper is missing evidence: an independent rollout still imports', async () => {
+    const e = freshEnv();
+    const s = (n: string) => join(e.sync, n);
+    const sl = await liveSleeper(); cleanup.push(sl.stop);
+    const dir = writeSession(e.home, { id: 's-tree', runtime: 'codex', wrapper: sl.id, cwd: e.cwd });
+    mkdirSync(join(dir, 'tree.jsonl')); // exists, but cannot be read as a file
+    const live = rolloutPath(e, 'indep-tree');
+    const w = spawnWriter(e, [
+      { open: live }, { write: live, lines: [...metaLines('indep-tree', e.cwd), usageLine({ input: 30, cached: 0, output: 3 })] },
+      { touch: s('ready') }, { forever: true },
+    ]);
+    cleanup.push(() => killQuiet(w.pid));
+    await waitFor(() => existsSync(s('ready')), T, 'rollout written');
+    const r = await runLens(['import', '--runtime', 'codex', '--json', '--tag', 'agent=imported'], e.env);
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.out)).toMatchObject({ imported: 1 });
+    expect(r.err).toMatch(/cannot read open-file evidence \(remembered process tree/);
+    const of = index(e.home).filter((x) => x.nativeSessionIds?.includes('indep-tree'));
+    expect(of).toHaveLength(1);
+    expect(of[0].tags).toEqual({ agent: 'imported' });
   }, T);
 });
 

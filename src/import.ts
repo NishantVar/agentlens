@@ -6,6 +6,7 @@ import { listCodexRollouts, rolloutNativeSessionId } from './codexRollout.js';
 import { codexSessionsRoot, hasClaim, readTree, tryClaim, writersOf } from './claims.js';
 import { descendantsIn, liveness, procTable } from './procinfo.js';
 import { parseSince } from './query.js';
+import { hook } from './testHooks.js';
 import { resolveTags } from './tags.js';
 import type { NormalizedEvent, Runtime } from './types.js';
 
@@ -105,7 +106,8 @@ export async function runImport(opts: ImportOptions): Promise<ImportSummary> {
       sum.skippedExisting++;
       return;
     }
-    for (const [i, ev] of c.events.entries()) writer.appendEvent({ ...ev, seq: i + 1 });
+    if (claim) hook('import:after-claim');
+    for (const [i, ev] of c.events.entries()) { writer.appendEvent({ ...ev, seq: i + 1 }); if (claim && i === 0) hook('import:after-first-event'); }
     try {
       copyFileSync(sourcePath, join(root, 'sessions', writer.id, copyName));
     } catch (e) {
