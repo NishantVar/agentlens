@@ -7,7 +7,7 @@ import { startDashboard } from '../src/dashboard.js';
 import type { ProcIdentity } from '../src/procinfo.js';
 import {
   claims, deadIdentity, eventLines, freshEnv, index, killQuiet, lensRunFake, liveSleeper, looks, metaLines, mockUpstream,
-  pidAlive, pidOf, rolloutPath, runLens, sessionIds, spawnLens, tmp, touch, usageLine, waitFor, type Env,
+  pidAlive, pidOf, rolloutPath, runLens, sessionIds, spawnLens, spawnWriter, tmp, touch, usageLine, waitFor, type Env,
 } from './helpers/lens.js';
 
 const T = 60000;
@@ -309,6 +309,65 @@ describe('lens import respects claims (plan §2.9)', () => {
     const entries = index(e.home);
     expect(entries).toHaveLength(1);
     expect(entries[0].nativeSessionIds).toEqual(['free']);
+  }, T);
+});
+
+describe('lens import before the first claim (PR #3)', () => {
+  it('[import-before-claim] an import while a wrapped rollout awaits its first look leaves one entry, with the wrapped tags; unwrapped rollouts still import', async () => {
+    const e = freshEnv();
+    const s = (n: string) => join(e.sync, n);
+    // The wrapper's lsof waits for <sync>/go, so its first look cannot
+    // succeed until the import has run. The import uses the real lsof.
+    const held = join(e.sync, 'lsof');
+    writeFileSync(held, `#!/bin/sh\nwhile [ ! -e "${s('go')}" ]; do sleep 0.02; done\nexec lsof "$@"\n`, { mode: 0o755 });
+    const wrapped = rolloutPath(e, 'wrapped'); const live = rolloutPath(e, 'live'); const done = rolloutPath(e, 'done');
+    const lk = s('looks.jsonl');
+    const r = lensRunFake(e, 'codex', [
+      { open: wrapped }, { write: wrapped, lines: [...metaLines('wrapped', e.cwd), usageLine({ input: 120, cached: 0, output: 30 })] },
+      { touch: s('ready') }, { wait: s('exit') }, { close: wrapped },
+    ], { AGENTLENS_LSOF: held, AGENTLENS_TEST_LOOK_LOG: lk, AGENTLENS_TAGS: 'agent=wrapped' });
+    // Independent, unwrapped rollouts: one still open by a writer outside any `lens run`, one closed.
+    const w = spawnWriter(e, [
+      { open: live }, { write: live, lines: [...metaLines('live', e.cwd), usageLine({ input: 70, cached: 0, output: 7 })] },
+      { touch: s('live-ready') }, { forever: true },
+    ]);
+    cleanup.push(() => { touch(s('go')); touch(s('exit')); killQuiet(r.child.pid); killQuiet(w.pid); });
+    mkdirSync(dirname(done), { recursive: true });
+    writeFileSync(done, [...metaLines('done', e.cwd), usageLine({ input: 50, cached: 0, output: 5 })].join('\n') + '\n');
+    await waitFor(() => existsSync(s('ready')) && existsSync(s('live-ready')), T, 'rollouts written');
+    expect(looks(lk).filter((l) => l.claimed.length)).toHaveLength(0); // no successful look yet
+
+    const imp = await runLens(['import', '--runtime', 'codex', '--json', '--tag', 'agent=imported'], e.env);
+    expect(imp.code).toBe(0);
+
+    touch(s('go'));
+    await waitFor(() => looks(lk).some((l) => l.claimed.length > 0), T, 'wrapped rollout claimed');
+    touch(s('exit'));
+    expect((await r.done).code).toBe(0);
+
+    const of = (id: string) => index(e.home).filter((x) => x.nativeSessionIds?.includes(id));
+    expect(of('wrapped')).toHaveLength(1);
+    expect(of('wrapped')[0].tags).toEqual({ agent: 'wrapped' });
+    expect(of('wrapped')[0].totals).toMatchObject({ input: 120, output: 30, requests: 1 });
+    expect(of('live')).toHaveLength(1);
+    expect(of('live')[0].tags).toEqual({ agent: 'imported' });
+    expect(of('done')).toHaveLength(1);
+    expect(of('done')[0].tags).toEqual({ agent: 'imported' });
+    const all = await statsJson(e);
+    expect(all.find((x) => x.key === '(all)')).toMatchObject({ sessions: 3, totals: expect.objectContaining({ input: 240, output: 42 }) });
+  }, T);
+
+  it('[import-no-evidence] with a running wrapper but no open-file evidence, import holds nothing back and says so', async () => {
+    const e = freshEnv({ AGENTLENS_LSOF: '/nonexistent/lsof' });
+    const sl = await liveSleeper(); cleanup.push(sl.stop);
+    writeSession(e.home, { id: 's-running', runtime: 'codex', wrapper: sl.id, cwd: e.cwd });
+    const p = rolloutPath(e, 'free');
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, [...metaLines('free', e.cwd), usageLine({ input: 50, cached: 0, output: 5 })].join('\n') + '\n');
+    const r = await runLens(['import', '--runtime', 'codex', '--json'], e.env);
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.out)).toMatchObject({ imported: 1 });
+    expect(r.err).toMatch(/cannot read open-file evidence/);
   }, T);
 });
 
