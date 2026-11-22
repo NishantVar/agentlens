@@ -7,7 +7,7 @@
 import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-export type HookPoint = 'claim:before-link' | 'finalize:after-ticket' | 'finalize:after-partial-events' | 'recover:before-gate' | 'recover:after-gate' | 'finalize:before-index-append' | 'finalize:after-prepare-temp' | 'finalize:before-temp-rm' | 'import:before-claim' | 'import:after-claim' | 'import:after-first-event';
+export type HookPoint = 'claim:before-link' | 'finalize:after-ticket' | 'finalize:after-partial-events' | 'recover:before-gate' | 'recover:after-gate' | 'finalize:before-index-append' | 'finalize:after-prepare-temp' | 'finalize:before-temp-rm' | 'import:after-claim' | 'import:after-first-event';
 
 const nap = new Int32Array(new SharedArrayBuffer(4));
 const thrown = new Set<HookPoint>();

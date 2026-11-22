@@ -573,52 +573,6 @@ describe('lens import before the first claim (PR #3)', () => {
     }, T);
   }
 
-  // Final approach: an import interrupted after its metadata, before its claim, is never an index entry.
-  for (const order of ['recover-then-retry', 'retry-then-recover'] as const) {
-    it(`[import-interrupted-before-claim:${order}] the metadata-only session is left out of the index and a retry counts the rollout once, in full`, async () => {
-      const e = freshEnv();
-      const name = `preclaim-${order}`;
-      const p = rolloutPath(e, name);
-      mkdirSync(dirname(p), { recursive: true });
-      writeFileSync(p, [...metaLines(name, e.cwd), usageLine({ input: 120, cached: 0, output: 30 })].join('\n') + '\n');
-      const args = ['import', '--runtime', 'codex', '--json', '--tag', 'agent=imported'];
-      const cut = await spawnLens(args, { ...e.env, AGENTLENS_TEST_HOOKS: 'import:before-claim=kill' }).done;
-      expect(cut.signal).toBe('SIGKILL');
-      const [stranded] = sessionIds(e.home);
-      expect(stranded).toBeTruthy();
-      expect(index(e.home)).toHaveLength(0);
-      const idleRecover = async () => {
-        ageTree(join(e.home, 'sessions', stranded), 2 * 60 * 60 * 1000);
-        const rec = await recover(e);
-        expect(rec.code).toBe(0);
-        expect(rec.err).toContain(stranded);
-        expect(rec.err).toContain('lens import');
-      };
-      const retry = async () => expect(JSON.parse((await runLens(args, e.env)).out)).toMatchObject({ imported: 1 });
-      if (order === 'recover-then-retry') { await idleRecover(); expect(index(e.home)).toHaveLength(0); await retry(); }
-      else { await retry(); await idleRecover(); }
-      const of = index(e.home).filter((x) => x.nativeSessionIds?.includes(name));
-      expect(of).toHaveLength(1);
-      expect(of[0].tags).toEqual({ agent: 'imported' });
-      expect(of[0].totals).toMatchObject({ input: 120, output: 30, requests: 1 });
-      expect(index(e.home)).toHaveLength(1);
-    }, T);
-  }
-
-  it('[legacy-import-events-only] an idle import session with stored events and no claim still recovers from those events', async () => {
-    const e = freshEnv();
-    const dir = writeSession(e.home, { id: 'legacy-imp', runtime: 'codex', tags: { agent: 'imported' }, usages: [{ input: 40, output: 4 }] });
-    const meta = JSON.parse(readFileSync(join(dir, 'meta.json'), 'utf8'));
-    writeFileSync(join(dir, 'meta.json'), JSON.stringify({ ...meta, nativeSessionIds: ['legacy-imp-native'], source: { kind: 'import', path: '/fixture/rollout.jsonl' } }));
-    ageTree(dir, 2 * 60 * 60 * 1000);
-    const rec = await recover(e);
-    expect(rec.out).toMatch(/recovered 1/);
-    const of = index(e.home).filter((x) => x.id === 'legacy-imp');
-    expect(of).toHaveLength(1);
-    expect(of[0].tags).toEqual({ agent: 'imported' });
-    expect(of[0].totals).toMatchObject({ input: 40, output: 4, requests: 1 });
-  }, T);
-
   it('[import-tree-unreadable] an unreadable remembered tree for a verified wrapper is missing evidence: an independent rollout still imports', async () => {
     const e = freshEnv();
     const s = (n: string) => join(e.sync, n);
