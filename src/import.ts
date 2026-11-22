@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { SessionWriter, StoreReader, newSessionId, storeRoot } from './store.js';
 import { claudeProjectsRoot, extractClaudeSessionIdFromRawBody, findClaudeTranscripts, parseClaudeTranscript } from './claudeTranscript.js';
 import { listCodexRollouts, rolloutNativeSessionId } from './codexRollout.js';
-import { codexSessionsRoot, hasClaim, writersOf } from './claims.js';
+import { codexSessionsRoot, hasClaim, readTree, writersOf } from './claims.js';
 import { descendantsIn, liveness, procTable } from './procinfo.js';
 import { parseSince } from './query.js';
 import { resolveTags } from './tags.js';
@@ -47,21 +47,32 @@ function knownNativeIds(reader: StoreReader, root: string): Set<string> {
 
 // Rollouts that a process in a live `lens run` Codex session's tree holds open
 // for writing. That wrapper will claim them, so importing one now would count
-// it twice; it is left to its session. Rollouts written outside any `lens run`
-// are unaffected. Without open-file evidence nothing is held back (fail-open).
-async function wrappedLiveRollouts(reader: StoreReader): Promise<Set<string>> {
-  const wrappers = reader.listActive().filter((m) => m.runtime === 'codex' && m.capture === 'logs' && m.wrapper && liveness(m.wrapper) !== 'gone');
+// it twice; it is left to its session. The tree includes every process the
+// wrapper's looks have seen whose start time still matches, so a writer that
+// has since been reparented is still covered. Only a wrapper whose identity is
+// verified alive counts: an unknown identity may be a reused pid, and holding
+// back on it could withhold an independent rollout. Rollouts written outside
+// any `lens run` are unaffected. Without open-file evidence nothing is held
+// back (fail-open), and import says so.
+async function wrappedLiveRollouts(reader: StoreReader, root: string): Promise<Set<string>> {
+  const wrappers = reader.listActive().filter((m) => m.runtime === 'codex' && m.capture === 'logs' && m.wrapper && liveness(m.wrapper) === 'alive');
   if (!wrappers.length) return new Set();
   let rootReal: string | null = null;
   try { rootReal = realpathSync(codexSessionsRoot()); } catch { return new Set(); }
+  const unreadable = (reason: string) => {
+    console.error(`agentlens: cannot read open-file evidence (${reason}); rollouts of running \`lens run\` sessions may be imported`);
+    return new Set<string>();
+  };
   const table = await procTable();
-  const roots = wrappers.map((m) => m.wrapper!.pid);
-  const pids = table ? [...roots, ...descendantsIn(table, roots)] : roots;
-  const ev = await writersOf(pids, rootReal);
-  if (!ev.ok) {
-    console.error(`agentlens: cannot read open-file evidence (${ev.reason}); rollouts of running \`lens run\` sessions may be imported`);
-    return new Set();
+  if (!table) return unreadable('ps: process table unreadable');
+  const roots = new Set<number>();
+  for (const m of wrappers) {
+    roots.add(m.wrapper!.pid);
+    for (const t of readTree(root, m.id)) if (t.startTime !== null && table.start.get(t.pid) === t.startTime) roots.add(t.pid);
   }
+  const pids = [...roots, ...descendantsIn(table, [...roots])];
+  const ev = await writersOf(pids, rootReal);
+  if (!ev.ok) return unreadable(ev.reason);
   return new Set(ev.held.map((h) => h.path));
 }
 
@@ -112,7 +123,7 @@ export async function runImport(opts: ImportOptions): Promise<ImportSummary> {
   if (opts.runtime !== 'claude') {
     // List first, then look: a rollout created after the look is not listed.
     const rollouts = listCodexRollouts();
-    const held = await wrappedLiveRollouts(reader);
+    const held = await wrappedLiveRollouts(reader, root);
     for (const r of rollouts) {
       try {
         // A claimed rollout belongs to a `lens run` session, finalized or not;

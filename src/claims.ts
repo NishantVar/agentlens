@@ -78,6 +78,19 @@ export function readHolders(root: string, session: string): ProcIdentity[] {
   return out;
 }
 
+// Every process a look has seen in the session's tree, so `lens import` can
+// also see a remembered writer that has since left the tree.
+export function recordTreeMember(root: string, session: string, id: ProcIdentity): void {
+  appendFileSync(join(root, 'sessions', session, 'tree.jsonl'), JSON.stringify(id) + '\n');
+}
+export function readTree(root: string, session: string): ProcIdentity[] {
+  const p = join(root, 'sessions', session, 'tree.jsonl');
+  if (!existsSync(p)) return [];
+  const out: ProcIdentity[] = [];
+  for (const l of readFileSync(p, 'utf8').split('\n')) { if (l.trim()) try { out.push(JSON.parse(l)); } catch { /* skip */ } }
+  return out;
+}
+
 // ---- open-file evidence -------------------------------------------------------------
 export type Evidence = { ok: true; held: { pid: number; path: string }[] } | { ok: false; reason: string };
 
@@ -157,7 +170,11 @@ export class Looker {
       for (const p of [this.rootPid, ...descendantsIn(table, roots)]) {
         const s = table.start.get(p);
         if (s === undefined) continue;
-        pids.add(p); this.remembered.set(p, s);
+        pids.add(p);
+        if (this.remembered.get(p) !== s) {
+          this.remembered.set(p, s);
+          try { recordTreeMember(this.root, this.session, { pid: p, startTime: s }); } catch { /* fail-open: only import's view narrows */ }
+        }
       }
       for (const [p, s] of this.remembered) if (table.start.get(p) === s) pids.add(p);
     } else {
