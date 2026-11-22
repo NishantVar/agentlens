@@ -1,10 +1,12 @@
-import { copyFileSync, readFileSync, readdirSync } from 'node:fs';
+import { copyFileSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { SessionWriter, StoreReader, newSessionId, storeRoot } from './store.js';
 import { claudeProjectsRoot, extractClaudeSessionIdFromRawBody, findClaudeTranscripts, parseClaudeTranscript } from './claudeTranscript.js';
 import { listCodexRollouts, rolloutNativeSessionId } from './codexRollout.js';
-import { hasClaim } from './claims.js';
+import { codexSessionsRoot, hasClaim, readTree, tryClaim, writersOf } from './claims.js';
+import { descendantsIn, liveness, procTable, type ProcIdentity } from './procinfo.js';
 import { parseSince } from './query.js';
+import { hook } from './testHooks.js';
 import { resolveTags } from './tags.js';
 import type { NormalizedEvent, Runtime } from './types.js';
 
@@ -44,7 +46,40 @@ function knownNativeIds(reader: StoreReader, root: string): Set<string> {
   return known;
 }
 
-export function runImport(opts: ImportOptions): ImportSummary {
+// Rollouts that a process in a live `lens run` Codex session's tree holds open
+// for writing. That wrapper will claim them, so importing one now would count
+// it twice; it is left to its session. The tree includes every process the
+// wrapper's looks have seen whose start time still matches, so a writer that
+// has since been reparented is still covered. Only a wrapper whose identity is
+// verified alive counts: an unknown identity may be a reused pid, and holding
+// back on it could withhold an independent rollout. Rollouts written outside
+// any `lens run` are unaffected. Without open-file evidence nothing is held
+// back (fail-open), and import says so.
+async function wrappedLiveRollouts(reader: StoreReader, root: string): Promise<Set<string>> {
+  const wrappers = reader.listActive().filter((m) => m.runtime === 'codex' && m.capture === 'logs' && m.wrapper && liveness(m.wrapper) === 'alive');
+  if (!wrappers.length) return new Set();
+  let rootReal: string | null = null;
+  try { rootReal = realpathSync(codexSessionsRoot()); } catch { return new Set(); }
+  const unreadable = (reason: string) => {
+    console.error(`agentlens: cannot read open-file evidence (${reason}); rollouts of running \`lens run\` sessions may be imported`);
+    return new Set<string>();
+  };
+  const table = await procTable();
+  if (!table) return unreadable('ps: process table unreadable');
+  const roots = new Set<number>();
+  for (const m of wrappers) {
+    roots.add(m.wrapper!.pid);
+    let tree: ProcIdentity[];
+    try { tree = readTree(root, m.id); } catch (e) { return unreadable(`remembered process tree of session ${m.id}: ${(e as Error).message}`); }
+    for (const t of tree) if (t.startTime !== null && table.start.get(t.pid) === t.startTime) roots.add(t.pid);
+  }
+  const pids = [...roots, ...descendantsIn(table, [...roots])];
+  const ev = await writersOf(pids, rootReal);
+  if (!ev.ok) return unreadable(ev.reason);
+  return new Set(ev.held.map((h) => h.path));
+}
+
+export async function runImport(opts: ImportOptions): Promise<ImportSummary> {
   const root = storeRoot();
   const reader = new StoreReader(root);
   const since = opts.since ? parseSince(opts.since) : undefined;
@@ -52,7 +87,9 @@ export function runImport(opts: ImportOptions): ImportSummary {
   const known = knownNativeIds(reader, root);
   const sum: ImportSummary = { imported: 0, skippedExisting: 0, skippedEmpty: 0, errors: 0 };
 
-  const consider = (runtime: Runtime, sourcePath: string, copyName: string, c: Candidate) => {
+  // `claim` is the real path of a codex rollout: import records the per-rollout
+  // claim before it counts it, so the first claim, import's or a session's, wins.
+  const consider = (runtime: Runtime, sourcePath: string, copyName: string, c: Candidate, claim?: string) => {
     if (since && (!c.startedAt || new Date(c.startedAt) < since)) return; // out of scope, not counted
     if (c.events.length === 0) { sum.skippedEmpty++; return; }
     if (!c.nativeSessionId) {
@@ -66,13 +103,19 @@ export function runImport(opts: ImportOptions): ImportSummary {
       lensVersion: LENS_VERSION, startedAt: c.startedAt ?? new Date().toISOString(),
       nativeSessionIds: [c.nativeSessionId], source: { kind: 'import', path: sourcePath },
     });
-    for (const [i, ev] of c.events.entries()) writer.appendEvent({ ...ev, seq: i + 1 });
+    if (claim && tryClaim(root, { rollout: claim, session: writer.id, holders: [], claimedAt: new Date().toISOString() }) !== 'won') {
+      rmSync(join(root, 'sessions', writer.id), { recursive: true, force: true });
+      sum.skippedExisting++;
+      return;
+    }
+    if (claim) hook('import:after-claim');
+    for (const [i, ev] of c.events.entries()) { writer.appendEvent({ ...ev, seq: i + 1 }); if (claim && i === 0) hook('import:after-first-event'); }
     try {
       copyFileSync(sourcePath, join(root, 'sessions', writer.id, copyName));
     } catch (e) {
       console.error(`agentlens: source copy failed (fail-open): ${(e as Error).message}`);
     }
-    writer.finalize(0, { endedAt: c.endedAt });
+    writer.finalize(0, { endedAt: c.endedAt, claims: [] }); // counted from the events above
     known.add(`${runtime}:${c.nativeSessionId}`);
     sum.imported++;
   };
@@ -89,11 +132,18 @@ export function runImport(opts: ImportOptions): ImportSummary {
     }
   }
   if (opts.runtime !== 'claude') {
-    for (const r of listCodexRollouts()) {
+    // List first, then look: a rollout created after the look is not listed.
+    const rollouts = listCodexRollouts();
+    const held = await wrappedLiveRollouts(reader, root);
+    for (const r of rollouts) {
       try {
-        // A claimed rollout belongs to a `lens run` session, finalized or not.
+        // A claimed rollout belongs to a `lens run` session, finalized or not;
+        // so does one a running session's tree is writing but has not claimed yet.
         if (hasClaim(root, r.rolloutPath)) { sum.skippedExisting++; continue; }
-        consider('codex', r.rolloutPath, 'rollout-1.jsonl', r);
+        let real = r.rolloutPath;
+        try { real = realpathSync(r.rolloutPath); } catch { /* compare as listed */ }
+        if (held.has(real)) { sum.skippedExisting++; continue; }
+        consider('codex', r.rolloutPath, 'rollout-1.jsonl', r, real);
       } catch (e) {
         sum.errors++;
         console.error(`agentlens: import failed for ${r.rolloutPath} (skipped): ${(e as Error).message}`);

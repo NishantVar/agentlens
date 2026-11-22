@@ -51,6 +51,13 @@ export function tryClaim(root: string, rec: ClaimRecord): 'won' | 'mine' | 'lost
   return readClaim(root, rec.rollout)?.session === rec.session ? 'mine' : 'lost';
 }
 
+// A claim recorded by `lens import`: its session's meta has an import source.
+export function claimedByImport(root: string, rollout: string): boolean {
+  const c = readClaim(root, rollout);
+  if (!c) return false;
+  try { return JSON.parse(readFileSync(join(root, 'sessions', c.session, 'meta.json'), 'utf8'))?.source?.kind === 'import'; } catch { return false; }
+}
+
 export function listClaims(root: string): ClaimRecord[] {
   const d = claimsDir(root);
   if (!existsSync(d)) return [];
@@ -72,6 +79,19 @@ export function recordHolder(root: string, session: string, id: ProcIdentity): v
 }
 export function readHolders(root: string, session: string): ProcIdentity[] {
   const p = join(root, 'sessions', session, 'holders.jsonl');
+  if (!existsSync(p)) return [];
+  const out: ProcIdentity[] = [];
+  for (const l of readFileSync(p, 'utf8').split('\n')) { if (l.trim()) try { out.push(JSON.parse(l)); } catch { /* skip */ } }
+  return out;
+}
+
+// Every process a look has seen in the session's tree, so `lens import` can
+// also see a remembered writer that has since left the tree.
+export function recordTreeMember(root: string, session: string, id: ProcIdentity): void {
+  appendFileSync(join(root, 'sessions', session, 'tree.jsonl'), JSON.stringify(id) + '\n');
+}
+export function readTree(root: string, session: string): ProcIdentity[] {
+  const p = join(root, 'sessions', session, 'tree.jsonl');
   if (!existsSync(p)) return [];
   const out: ProcIdentity[] = [];
   for (const l of readFileSync(p, 'utf8').split('\n')) { if (l.trim()) try { out.push(JSON.parse(l)); } catch { /* skip */ } }
@@ -122,6 +142,7 @@ export const LOOK_DELAY_MS = 900; // < 1 s after each look ends, by construction
 export class Looker {
   private owned = new Map<string, ProcIdentity[]>();
   private lost = new Set<string>();
+  readonly lostToImport = new Set<string>();
   private remembered = new Map<number, string>(); // pid -> start time
   private chain: Promise<void> = Promise.resolve();
   private stopped = false;
@@ -157,7 +178,11 @@ export class Looker {
       for (const p of [this.rootPid, ...descendantsIn(table, roots)]) {
         const s = table.start.get(p);
         if (s === undefined) continue;
-        pids.add(p); this.remembered.set(p, s);
+        pids.add(p);
+        if (this.remembered.get(p) !== s) {
+          this.remembered.set(p, s);
+          try { recordTreeMember(this.root, this.session, { pid: p, startTime: s }); } catch { /* fail-open: only import's view narrows */ }
+        }
       }
       for (const [p, s] of this.remembered) if (table.start.get(p) === s) pids.add(p);
     } else {
@@ -183,7 +208,8 @@ export class Looker {
           continue;
         }
         const r = tryClaim(this.root, { rollout: path, session: this.session, holders, claimedAt: new Date().toISOString() });
-        if (r === 'lost') this.lost.add(path); else this.owned.set(path, [...holders]);
+        if (r === 'lost') { this.lost.add(path); if (claimedByImport(this.root, path)) this.lostToImport.add(path); }
+        else this.owned.set(path, [...holders]);
       }
     }
     const lookLog = process.env.AGENTLENS_TEST_LOOK_LOG;

@@ -31,7 +31,7 @@ program.command('import')
       process.exit(2);
     }
     const { runImport } = await import('./import.js');
-    const sum = runImport({ runtime: opts.runtime as 'claude' | 'codex' | undefined, since: opts.since, tag: opts.tag });
+    const sum = await runImport({ runtime: opts.runtime as 'claude' | 'codex' | undefined, since: opts.since, tag: opts.tag });
     if (opts.json) { process.stdout.write(JSON.stringify(sum) + '\n'); return; }
     const errs = sum.errors ? `, ${sum.errors} errors` : '';
     process.stdout.write(`imported ${sum.imported}, skipped ${sum.skippedExisting} (already present), skipped ${sum.skippedEmpty} (empty)${errs}\n`);

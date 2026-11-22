@@ -1,13 +1,14 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, utimesSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { StoreReader } from '../src/store.js';
 import { startDashboard } from '../src/dashboard.js';
 import type { ProcIdentity } from '../src/procinfo.js';
 import {
-  claims, deadIdentity, eventLines, freshEnv, index, killQuiet, lensRunFake, liveSleeper, looks, metaLines, mockUpstream,
-  pidAlive, pidOf, rolloutPath, runLens, sessionIds, spawnLens, tmp, touch, usageLine, waitFor, type Env,
+  FAKE_BIN, claims, deadIdentity, eventLines, freshEnv, index, killQuiet, lensRunFake, liveSleeper, looks, metaLines, mockUpstream,
+  pidAlive, pidOf, rolloutPath, runLens, sessionIds, spawnLens, spawnWriter, tmp, touch, usageLine, waitFor, type Env,
 } from './helpers/lens.js';
 
 const T = 60000;
@@ -52,6 +53,7 @@ const ageTree = (dir: string, ms: number) => {
   for (const f of readdirSync(dir)) utimesSync(join(dir, f), t, t);
   utimesSync(dir, t, t);
 };
+const ppidOf = (pid: number): number => { try { return Number(execFileSync('ps', ['-o', 'ppid=', '-p', String(pid)], { encoding: 'utf8' }).trim()); } catch { return -1; } };
 const claimHash = (p: string) => createHash('sha256').update(p).digest('hex');
 
 describe('recovery sweep', () => {
@@ -309,6 +311,288 @@ describe('lens import respects claims (plan §2.9)', () => {
     const entries = index(e.home);
     expect(entries).toHaveLength(1);
     expect(entries[0].nativeSessionIds).toEqual(['free']);
+  }, T);
+});
+
+describe('lens import before the first claim (PR #3)', () => {
+  it('[import-before-claim] an import while a wrapped rollout awaits its first look leaves one entry, with the wrapped tags; unwrapped rollouts still import', async () => {
+    const e = freshEnv();
+    const s = (n: string) => join(e.sync, n);
+    // The wrapper's lsof waits for <sync>/go, so its first look cannot
+    // succeed until the import has run. The import uses the real lsof.
+    const held = join(e.sync, 'lsof');
+    writeFileSync(held, `#!/bin/sh\nwhile [ ! -e "${s('go')}" ]; do sleep 0.02; done\nexec lsof "$@"\n`, { mode: 0o755 });
+    const wrapped = rolloutPath(e, 'wrapped'); const live = rolloutPath(e, 'live'); const done = rolloutPath(e, 'done');
+    const lk = s('looks.jsonl');
+    const r = lensRunFake(e, 'codex', [
+      { open: wrapped }, { write: wrapped, lines: [...metaLines('wrapped', e.cwd), usageLine({ input: 120, cached: 0, output: 30 })] },
+      { touch: s('ready') }, { wait: s('exit') }, { close: wrapped },
+    ], { AGENTLENS_LSOF: held, AGENTLENS_TEST_LOOK_LOG: lk, AGENTLENS_TAGS: 'agent=wrapped' });
+    // Independent, unwrapped rollouts: one still open by a writer outside any `lens run`, one closed.
+    const w = spawnWriter(e, [
+      { open: live }, { write: live, lines: [...metaLines('live', e.cwd), usageLine({ input: 70, cached: 0, output: 7 })] },
+      { touch: s('live-ready') }, { forever: true },
+    ]);
+    cleanup.push(() => { touch(s('go')); touch(s('exit')); killQuiet(r.child.pid); killQuiet(w.pid); });
+    mkdirSync(dirname(done), { recursive: true });
+    writeFileSync(done, [...metaLines('done', e.cwd), usageLine({ input: 50, cached: 0, output: 5 })].join('\n') + '\n');
+    await waitFor(() => existsSync(s('ready')) && existsSync(s('live-ready')), T, 'rollouts written');
+    expect(looks(lk).filter((l) => l.claimed.length)).toHaveLength(0); // no successful look yet
+
+    const imp = await runLens(['import', '--runtime', 'codex', '--json', '--tag', 'agent=imported'], e.env);
+    expect(imp.code).toBe(0);
+
+    touch(s('go'));
+    await waitFor(() => looks(lk).some((l) => l.claimed.length > 0), T, 'wrapped rollout claimed');
+    touch(s('exit'));
+    expect((await r.done).code).toBe(0);
+
+    const of = (id: string) => index(e.home).filter((x) => x.nativeSessionIds?.includes(id));
+    expect(of('wrapped')).toHaveLength(1);
+    expect(of('wrapped')[0].tags).toEqual({ agent: 'wrapped' });
+    expect(of('wrapped')[0].totals).toMatchObject({ input: 120, output: 30, requests: 1 });
+    expect(of('live')).toHaveLength(1);
+    expect(of('live')[0].tags).toEqual({ agent: 'imported' });
+    expect(of('done')).toHaveLength(1);
+    expect(of('done')[0].tags).toEqual({ agent: 'imported' });
+    const all = await statsJson(e);
+    expect(all.find((x) => x.key === '(all)')).toMatchObject({ sessions: 3, totals: expect.objectContaining({ input: 240, output: 42 }) });
+  }, T);
+
+  it('[import-no-evidence] with a running wrapper but no open-file evidence, import holds nothing back and says so', async () => {
+    const e = freshEnv({ AGENTLENS_LSOF: '/nonexistent/lsof' });
+    const sl = await liveSleeper(); cleanup.push(sl.stop);
+    writeSession(e.home, { id: 's-running', runtime: 'codex', wrapper: sl.id, cwd: e.cwd });
+    const p = rolloutPath(e, 'free');
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, [...metaLines('free', e.cwd), usageLine({ input: 50, cached: 0, output: 5 })].join('\n') + '\n');
+    const r = await runLens(['import', '--runtime', 'codex', '--json'], e.env);
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.out)).toMatchObject({ imported: 1 });
+    expect(r.err).toMatch(/cannot read open-file evidence/);
+  }, T);
+  // Route ruling §1 (option B): the first claim wins; with degraded evidence the one entry may carry the import's tags.
+  it('[import-lookup-lost] import cannot read open-file evidence, then the wrapper looks: one entry, with the import\'s tags, and stderr says why', async () => {
+    const e = freshEnv();
+    const s = (n: string) => join(e.sync, n);
+    const held = join(e.sync, 'lsof');
+    writeFileSync(held, `#!/bin/sh\nwhile [ ! -e "${s('go')}" ]; do sleep 0.02; done\nexec lsof "$@"\n`, { mode: 0o755 });
+    const wrapped = rolloutPath(e, 'wrapped');
+    const lk = s('looks.jsonl');
+    const r = lensRunFake(e, 'codex', [
+      { open: wrapped }, { write: wrapped, lines: [...metaLines('wrapped', e.cwd), usageLine({ input: 120, cached: 0, output: 30 })] },
+      { touch: s('ready') }, { wait: s('exit') }, { close: wrapped },
+    ], { AGENTLENS_LSOF: held, AGENTLENS_TEST_LOOK_LOG: lk, AGENTLENS_TAGS: 'agent=wrapped' });
+    cleanup.push(() => { touch(s('go')); touch(s('exit')); killQuiet(r.child.pid); });
+    await waitFor(() => existsSync(s('ready')), T, 'rollout written');
+    expect(looks(lk).filter((l) => l.claimed.length)).toHaveLength(0);
+
+    const imp = await runLens(['import', '--runtime', 'codex', '--json', '--tag', 'agent=imported'], { ...e.env, AGENTLENS_LSOF: '/nonexistent/lsof' });
+    expect(imp.code).toBe(0);
+    expect(imp.err).toMatch(/cannot read open-file evidence/);
+
+    touch(s('go'));
+    const after = looks(lk).length;
+    await waitFor(() => looks(lk).length >= after + 2, T, 'two wrapper looks with real lsof');
+    touch(s('exit'));
+    const done = await r.done;
+    expect(done.code).toBe(0);
+    expect(r.err()).toContain(realpathSync(wrapped));
+    const of = index(e.home).filter((x) => x.nativeSessionIds?.includes('wrapped'));
+    expect(of).toHaveLength(1);
+    expect(of[0].tags).toEqual({ agent: 'imported' });
+    expect(of[0].totals).toMatchObject({ input: 120, output: 30, requests: 1 });
+  }, T);
+
+  it('[import-reparented] a writer the wrapper remembers, since reparented out of its tree, is left to the wrapper', async () => {
+    const e = freshEnv();
+    const s = (n: string) => join(e.sync, n);
+    // The wrapper's lsof passes through until <sync>/hold exists, then waits for <sync>/go.
+    const lsof = join(e.sync, 'lsof');
+    writeFileSync(lsof, `#!/bin/sh\nif [ -e "${s('hold')}" ]; then while [ ! -e "${s('go')}" ]; do sleep 0.02; done; fi\nexec lsof "$@"\n`, { mode: 0o755 });
+    const ro = rolloutPath(e, 'reparented');
+    const bin = join(e.sync, 'bin'); mkdirSync(bin);
+    // codex -> mid -> writer. When mid exits, the writer leaves the wrapper's tree.
+    writeFileSync(join(bin, 'codex'), `#!/bin/sh\n( "${join(FAKE_BIN, 'writer')}" & echo $! > "${s('wpid')}"; while [ ! -e "${s('mid-exit')}" ]; do sleep 0.02; done ) &\nwhile [ ! -e "${s('exit')}" ]; do sleep 0.02; done\n`, { mode: 0o755 });
+    const script = [
+      { wait: s('open') }, { open: ro }, { write: ro, lines: [...metaLines('reparented', e.cwd), usageLine({ input: 90, cached: 0, output: 9 })] },
+      { touch: s('written') }, { wait: s('writer-exit') }, { close: ro },
+    ];
+    const lk = s('looks.jsonl');
+    const r = spawnLens(['run', '--', join(bin, 'codex')], { ...e.env, FAKE_SCRIPT: JSON.stringify(script), AGENTLENS_LSOF: lsof, AGENTLENS_TEST_LOOK_LOG: lk, AGENTLENS_TAGS: 'agent=wrapped' }, { cwd: e.cwd });
+    let wpid = 0;
+    cleanup.push(() => { for (const f of ['go', 'open', 'mid-exit', 'writer-exit', 'exit']) touch(s(f)); killQuiet(r.child.pid); if (wpid) killQuiet(wpid); });
+    wpid = await waitFor(() => existsSync(s('wpid')) && Number(readFileSync(s('wpid'), 'utf8')), T, 'writer pid');
+    const seenAt = Date.now();
+    await waitFor(() => looks(lk).some((l) => l.startedAt > seenAt), T, 'a look with the writer in the tree');
+    touch(s('hold'));
+    touch(s('mid-exit'));
+    await waitFor(() => ppidOf(wpid) === 1, T, 'writer reparented');
+    touch(s('open'));
+    await waitFor(() => existsSync(s('written')), T, 'rollout written');
+    expect(looks(lk).filter((l) => l.claimed.length)).toHaveLength(0);
+
+    const imp = await runLens(['import', '--runtime', 'codex', '--json', '--tag', 'agent=imported'], e.env);
+    expect(imp.code).toBe(0);
+
+    touch(s('go'));
+    await waitFor(() => looks(lk).some((l) => l.claimed.length > 0), T, 'remembered writer claimed');
+    touch(s('writer-exit'));
+    await waitFor(() => !pidAlive(wpid), T, 'writer exited');
+    touch(s('exit'));
+    expect((await r.done).code).toBe(0);
+    const of = index(e.home).filter((x) => x.nativeSessionIds?.includes('reparented'));
+    expect(of).toHaveLength(1);
+    expect(of[0].tags).toEqual({ agent: 'wrapped' });
+    expect(of[0].totals).toMatchObject({ input: 90, output: 9, requests: 1 });
+  }, T);
+
+  it('[import-unknown-wrapper] a stale wrapper record with unknown identity on a reused pid does not hold back an independent writer', async () => {
+    const e = freshEnv();
+    const s = (n: string) => join(e.sync, n);
+    const live = rolloutPath(e, 'independent');
+    const w = spawnWriter(e, [
+      { open: live }, { write: live, lines: [...metaLines('independent', e.cwd), usageLine({ input: 40, cached: 0, output: 4 })] },
+      { touch: s('ready') }, { forever: true },
+    ]);
+    cleanup.push(() => killQuiet(w.pid));
+    await waitFor(() => existsSync(s('ready')), T, 'rollout written');
+    // A wrapper whose identity lookup failed saved a null start time; its pid is now the independent writer's.
+    writeSession(e.home, { id: 's-stale', runtime: 'codex', wrapper: { pid: w.pid!, startTime: null }, cwd: e.cwd });
+    const r = await runLens(['import', '--runtime', 'codex', '--json', '--tag', 'agent=imported'], e.env);
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.out)).toMatchObject({ imported: 1 });
+    const of = index(e.home).filter((x) => x.nativeSessionIds?.includes('independent'));
+    expect(of).toHaveLength(1);
+    expect(of[0].tags).toEqual({ agent: 'imported' });
+  }, T);
+  // Route ruling §2: a wrapped resume of an already-counted rollout counts nothing for it and names it.
+  const closedRollout = (e: Env, name: string) => {
+    const p = rolloutPath(e, name);
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, [...metaLines(name, e.cwd), usageLine({ input: 50, cached: 0, output: 5 })].join('\n') + '\n');
+    return p;
+  };
+  const resumeWrapped = (e: Env, p: string, ready: string, exit: string) => lensRunFake(e, 'codex', [
+    { open: p }, { write: p, lines: [usageLine({ input: 20, cached: 0, output: 2 })] }, { touch: ready }, { wait: exit }, { close: p },
+  ], { AGENTLENS_TEST_LOOK_LOG: join(e.sync, 'looks.jsonl'), AGENTLENS_TAGS: 'agent=wrapped' });
+  const forgetClaim = (e: Env, p: string) => rmSync(join(e.home, 'claims', claimHash(realpathSync(p)) + '.json'), { force: true });
+  const onlyEntry = (e: Env, id: string) => {
+    const of = index(e.home).filter((x) => x.nativeSessionIds?.includes(id));
+    expect(of).toHaveLength(1);
+    expect(of[0].tags).toEqual({ agent: 'imported' });
+    expect(of[0].totals).toMatchObject({ input: 50, output: 5, requests: 1 });
+  };
+
+  it('[resume-after-import] a wrapped resume of an imported rollout keeps the one imported entry and names the rollout', async () => {
+    const e = freshEnv();
+    const s = (n: string) => join(e.sync, n);
+    const p = closedRollout(e, 'resumed');
+    const imp = await runLens(['import', '--runtime', 'codex', '--json', '--tag', 'agent=imported'], e.env);
+    expect(JSON.parse(imp.out)).toMatchObject({ imported: 1 });
+    const r = resumeWrapped(e, p, s('ready'), s('exit'));
+    cleanup.push(() => { touch(s('exit')); killQuiet(r.child.pid); });
+    await waitFor(() => existsSync(s('ready')), T, 'resume wrote');
+    const n = looks(s('looks.jsonl')).length;
+    await waitFor(() => looks(s('looks.jsonl')).length >= n + 2, T, 'two looks after the resume wrote');
+    touch(s('exit'));
+    expect((await r.done).code).toBe(0);
+    expect(r.err()).toContain(realpathSync(p));
+    onlyEntry(e, 'resumed');
+    const again = await runLens(['import', '--runtime', 'codex', '--json', '--tag', 'agent=imported'], e.env);
+    expect(JSON.parse(again.out)).toMatchObject({ imported: 0 });
+    onlyEntry(e, 'resumed');
+  }, T);
+
+  it('[resume-after-legacy-import] a rollout indexed by an import with no claim is not counted again by a wrapped resume', async () => {
+    const e = freshEnv();
+    const s = (n: string) => join(e.sync, n);
+    const p = closedRollout(e, 'legacy');
+    await runLens(['import', '--runtime', 'codex', '--json', '--tag', 'agent=imported'], e.env);
+    forgetClaim(e, p); // as an import made before import claimed
+    const r = resumeWrapped(e, p, s('ready'), s('exit'));
+    cleanup.push(() => { touch(s('exit')); killQuiet(r.child.pid); });
+    await waitFor(() => existsSync(s('ready')), T, 'resume wrote');
+    await waitFor(() => looks(s('looks.jsonl')).some((l) => l.claimed.length), T, 'resume claimed');
+    touch(s('exit'));
+    expect((await r.done).code).toBe(0);
+    expect(r.err()).toContain(realpathSync(p));
+    onlyEntry(e, 'legacy');
+    const leftovers = readdirSync(join(e.home, 'sessions')).flatMap((d) => readdirSync(join(e.home, 'sessions', d)).filter((f) => f.startsWith('rollout-prepared.')));
+    expect(leftovers).toEqual([]);
+  }, T);
+
+  it('[resume-after-legacy-import-recover] the same holds when lens recover finalizes the killed resume', async () => {
+    const e = freshEnv();
+    const s = (n: string) => join(e.sync, n);
+    const p = closedRollout(e, 'legacy-rec');
+    await runLens(['import', '--runtime', 'codex', '--json', '--tag', 'agent=imported'], e.env);
+    forgetClaim(e, p);
+    const r = resumeWrapped(e, p, s('ready'), s('exit'));
+    cleanup.push(() => { touch(s('exit')); killQuiet(r.child.pid); });
+    await waitFor(() => existsSync(s('ready')), T, 'resume wrote');
+    await waitFor(() => looks(s('looks.jsonl')).some((l) => l.claimed.length), T, 'resume claimed');
+    const codexPid = Number(readFileSync(s('ready'), 'utf8'));
+    r.child.kill('SIGKILL');
+    await r.done;
+    touch(s('exit'));
+    await waitFor(() => !pidAlive(codexPid), T, 'resumed codex exited');
+    const out = await recover(e);
+    expect(out.code).toBe(0);
+    expect(out.err).toContain(realpathSync(p));
+    onlyEntry(e, 'legacy-rec');
+  }, T);
+  // Review r2: an import interrupted after its claim is restored in full by recover, once.
+  for (const [name, point, lines] of [
+    ['import-interrupted-after-claim', 'import:after-claim', [usageLine({ input: 120, cached: 0, output: 30 })]],
+    ['import-interrupted-mid-events', 'import:after-first-event', [usageLine({ input: 60, cached: 0, output: 10 }), usageLine({ input: 60, cached: 0, output: 20 })]],
+  ] as const) {
+    it(`[${name}] recover counts the interrupted import's rollout once, with its full usage and the import's tags`, async () => {
+      const e = freshEnv();
+      const p = rolloutPath(e, name);
+      mkdirSync(dirname(p), { recursive: true });
+      writeFileSync(p, [...metaLines(name, e.cwd), ...lines].join('\n') + '\n');
+      const imp = (env: NodeJS.ProcessEnv = e.env) => runLens(['import', '--runtime', 'codex', '--json', '--tag', 'agent=imported'], env);
+      const cut = await spawnLens(['import', '--runtime', 'codex', '--json', '--tag', 'agent=imported'], { ...e.env, AGENTLENS_TEST_HOOKS: `${point}=kill` }).done;
+      expect(cut.signal).toBe('SIGKILL');
+      expect(index(e.home)).toHaveLength(0);
+      expect(JSON.parse((await imp()).out)).toMatchObject({ imported: 0 }); // claimed: a retry before recovery skips it
+      for (const id of sessionIds(e.home)) ageTree(join(e.home, 'sessions', id), 2 * 60 * 60 * 1000);
+      const rec = await recover(e);
+      expect(rec.code).toBe(0);
+      expect(rec.out).toMatch(/recovered 1/);
+      const check = () => {
+        const of = index(e.home).filter((x) => x.nativeSessionIds?.includes(name));
+        expect(of).toHaveLength(1);
+        expect(of[0].tags).toEqual({ agent: 'imported' });
+        expect(of[0].totals).toMatchObject({ input: 120, output: 30, requests: lines.length });
+      };
+      check();
+      expect(JSON.parse((await imp()).out)).toMatchObject({ imported: 0 });
+      check();
+    }, T);
+  }
+
+  it('[import-tree-unreadable] an unreadable remembered tree for a verified wrapper is missing evidence: an independent rollout still imports', async () => {
+    const e = freshEnv();
+    const s = (n: string) => join(e.sync, n);
+    const sl = await liveSleeper(); cleanup.push(sl.stop);
+    const dir = writeSession(e.home, { id: 's-tree', runtime: 'codex', wrapper: sl.id, cwd: e.cwd });
+    mkdirSync(join(dir, 'tree.jsonl')); // exists, but cannot be read as a file
+    const live = rolloutPath(e, 'indep-tree');
+    const w = spawnWriter(e, [
+      { open: live }, { write: live, lines: [...metaLines('indep-tree', e.cwd), usageLine({ input: 30, cached: 0, output: 3 })] },
+      { touch: s('ready') }, { forever: true },
+    ]);
+    cleanup.push(() => killQuiet(w.pid));
+    await waitFor(() => existsSync(s('ready')), T, 'rollout written');
+    const r = await runLens(['import', '--runtime', 'codex', '--json', '--tag', 'agent=imported'], e.env);
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.out)).toMatchObject({ imported: 1 });
+    expect(r.err).toMatch(/cannot read open-file evidence \(remembered process tree/);
+    const of = index(e.home).filter((x) => x.nativeSessionIds?.includes('indep-tree'));
+    expect(of).toHaveLength(1);
+    expect(of[0].tags).toEqual({ agent: 'imported' });
   }, T);
 });
 

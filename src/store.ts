@@ -1,4 +1,5 @@
 import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, writeFileSync } from 'node:fs';
+import type { ClaimRecord } from './claims.js';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -110,10 +111,10 @@ export class SessionWriter {
     this.ensureDir();
     appendFileSync(join(this.dir, 'events.jsonl'), JSON.stringify(ev) + '\n');
   }
-  finalize(exitCode: number | null, extra?: { endedAt?: string; nativeSessionIds?: string[] }): IndexEntry {
+  finalize(exitCode: number | null, extra?: { endedAt?: string; nativeSessionIds?: string[]; claims?: ClaimRecord[] }): IndexEntry {
     this.ensureDir();
     const entry = finalizeSession(this.root, this.id, {
-      exitCode, role: 'writer', endedAt: extra?.endedAt, nativeSessionIds: extra?.nativeSessionIds, meta: this.meta,
+      exitCode, role: 'writer', endedAt: extra?.endedAt, nativeSessionIds: extra?.nativeSessionIds, claims: extra?.claims, meta: this.meta,
     });
     if (!entry) throw new Error(`session ${this.id} was already finalized`);
     this.meta = { ...this.meta, endedAt: entry.endedAt, exitCode, nativeSessionIds: entry.nativeSessionIds };
