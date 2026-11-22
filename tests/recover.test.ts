@@ -2,11 +2,12 @@ import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, utimesSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { StoreReader } from '../src/store.js';
 import { startDashboard } from '../src/dashboard.js';
 import type { ProcIdentity } from '../src/procinfo.js';
 import {
-  claims, deadIdentity, eventLines, freshEnv, index, killQuiet, lensRunFake, liveSleeper, looks, metaLines, mockUpstream,
+  FAKE_BIN, claims, deadIdentity, eventLines, freshEnv, index, killQuiet, lensRunFake, liveSleeper, looks, metaLines, mockUpstream,
   pidAlive, pidOf, rolloutPath, runLens, sessionIds, spawnLens, spawnWriter, tmp, touch, usageLine, waitFor, type Env,
 } from './helpers/lens.js';
 
@@ -52,6 +53,7 @@ const ageTree = (dir: string, ms: number) => {
   for (const f of readdirSync(dir)) utimesSync(join(dir, f), t, t);
   utimesSync(dir, t, t);
 };
+const ppidOf = (pid: number): number => { try { return Number(execFileSync('ps', ['-o', 'ppid=', '-p', String(pid)], { encoding: 'utf8' }).trim()); } catch { return -1; } };
 const claimHash = (p: string) => createHash('sha256').update(p).digest('hex');
 
 describe('recovery sweep', () => {
@@ -368,6 +370,96 @@ describe('lens import before the first claim (PR #3)', () => {
     expect(r.code).toBe(0);
     expect(JSON.parse(r.out)).toMatchObject({ imported: 1 });
     expect(r.err).toMatch(/cannot read open-file evidence/);
+  }, T);
+  it('[import-lookup-lost] import cannot read open-file evidence, then the wrapper claims: one entry, with the wrapped tags', async () => {
+    const e = freshEnv();
+    const s = (n: string) => join(e.sync, n);
+    const held = join(e.sync, 'lsof');
+    writeFileSync(held, `#!/bin/sh\nwhile [ ! -e "${s('go')}" ]; do sleep 0.02; done\nexec lsof "$@"\n`, { mode: 0o755 });
+    const wrapped = rolloutPath(e, 'wrapped');
+    const lk = s('looks.jsonl');
+    const r = lensRunFake(e, 'codex', [
+      { open: wrapped }, { write: wrapped, lines: [...metaLines('wrapped', e.cwd), usageLine({ input: 120, cached: 0, output: 30 })] },
+      { touch: s('ready') }, { wait: s('exit') }, { close: wrapped },
+    ], { AGENTLENS_LSOF: held, AGENTLENS_TEST_LOOK_LOG: lk, AGENTLENS_TAGS: 'agent=wrapped' });
+    cleanup.push(() => { touch(s('go')); touch(s('exit')); killQuiet(r.child.pid); });
+    await waitFor(() => existsSync(s('ready')), T, 'rollout written');
+    expect(looks(lk).filter((l) => l.claimed.length)).toHaveLength(0);
+
+    const imp = await runLens(['import', '--runtime', 'codex', '--json', '--tag', 'agent=imported'], { ...e.env, AGENTLENS_LSOF: '/nonexistent/lsof' });
+    expect(imp.code).toBe(0);
+
+    touch(s('go'));
+    await waitFor(() => looks(lk).some((l) => l.claimed.length > 0), T, 'wrapped rollout claimed');
+    touch(s('exit'));
+    expect((await r.done).code).toBe(0);
+    const of = index(e.home).filter((x) => x.nativeSessionIds?.includes('wrapped'));
+    expect(of).toHaveLength(1);
+    expect(of[0].tags).toEqual({ agent: 'wrapped' });
+    expect(of[0].totals).toMatchObject({ input: 120, output: 30, requests: 1 });
+  }, T);
+
+  it('[import-reparented] a writer the wrapper remembers, since reparented out of its tree, is left to the wrapper', async () => {
+    const e = freshEnv();
+    const s = (n: string) => join(e.sync, n);
+    // The wrapper's lsof passes through until <sync>/hold exists, then waits for <sync>/go.
+    const lsof = join(e.sync, 'lsof');
+    writeFileSync(lsof, `#!/bin/sh\nif [ -e "${s('hold')}" ]; then while [ ! -e "${s('go')}" ]; do sleep 0.02; done; fi\nexec lsof "$@"\n`, { mode: 0o755 });
+    const ro = rolloutPath(e, 'reparented');
+    const bin = join(e.sync, 'bin'); mkdirSync(bin);
+    // codex -> mid -> writer. When mid exits, the writer leaves the wrapper's tree.
+    writeFileSync(join(bin, 'codex'), `#!/bin/sh\n( "${join(FAKE_BIN, 'writer')}" & echo $! > "${s('wpid')}"; while [ ! -e "${s('mid-exit')}" ]; do sleep 0.02; done ) &\nwhile [ ! -e "${s('exit')}" ]; do sleep 0.02; done\n`, { mode: 0o755 });
+    const script = [
+      { wait: s('open') }, { open: ro }, { write: ro, lines: [...metaLines('reparented', e.cwd), usageLine({ input: 90, cached: 0, output: 9 })] },
+      { touch: s('written') }, { wait: s('writer-exit') }, { close: ro },
+    ];
+    const lk = s('looks.jsonl');
+    const r = spawnLens(['run', '--', join(bin, 'codex')], { ...e.env, FAKE_SCRIPT: JSON.stringify(script), AGENTLENS_LSOF: lsof, AGENTLENS_TEST_LOOK_LOG: lk, AGENTLENS_TAGS: 'agent=wrapped' }, { cwd: e.cwd });
+    let wpid = 0;
+    cleanup.push(() => { for (const f of ['go', 'open', 'mid-exit', 'writer-exit', 'exit']) touch(s(f)); killQuiet(r.child.pid); if (wpid) killQuiet(wpid); });
+    wpid = await waitFor(() => existsSync(s('wpid')) && Number(readFileSync(s('wpid'), 'utf8')), T, 'writer pid');
+    const seenAt = Date.now();
+    await waitFor(() => looks(lk).some((l) => l.startedAt > seenAt), T, 'a look with the writer in the tree');
+    touch(s('hold'));
+    touch(s('mid-exit'));
+    await waitFor(() => ppidOf(wpid) === 1, T, 'writer reparented');
+    touch(s('open'));
+    await waitFor(() => existsSync(s('written')), T, 'rollout written');
+    expect(looks(lk).filter((l) => l.claimed.length)).toHaveLength(0);
+
+    const imp = await runLens(['import', '--runtime', 'codex', '--json', '--tag', 'agent=imported'], e.env);
+    expect(imp.code).toBe(0);
+
+    touch(s('go'));
+    await waitFor(() => looks(lk).some((l) => l.claimed.length > 0), T, 'remembered writer claimed');
+    touch(s('writer-exit'));
+    await waitFor(() => !pidAlive(wpid), T, 'writer exited');
+    touch(s('exit'));
+    expect((await r.done).code).toBe(0);
+    const of = index(e.home).filter((x) => x.nativeSessionIds?.includes('reparented'));
+    expect(of).toHaveLength(1);
+    expect(of[0].tags).toEqual({ agent: 'wrapped' });
+    expect(of[0].totals).toMatchObject({ input: 90, output: 9, requests: 1 });
+  }, T);
+
+  it('[import-unknown-wrapper] a stale wrapper record with unknown identity on a reused pid does not hold back an independent writer', async () => {
+    const e = freshEnv();
+    const s = (n: string) => join(e.sync, n);
+    const live = rolloutPath(e, 'independent');
+    const w = spawnWriter(e, [
+      { open: live }, { write: live, lines: [...metaLines('independent', e.cwd), usageLine({ input: 40, cached: 0, output: 4 })] },
+      { touch: s('ready') }, { forever: true },
+    ]);
+    cleanup.push(() => killQuiet(w.pid));
+    await waitFor(() => existsSync(s('ready')), T, 'rollout written');
+    // A wrapper whose identity lookup failed saved a null start time; its pid is now the independent writer's.
+    writeSession(e.home, { id: 's-stale', runtime: 'codex', wrapper: { pid: w.pid!, startTime: null }, cwd: e.cwd });
+    const r = await runLens(['import', '--runtime', 'codex', '--json', '--tag', 'agent=imported'], e.env);
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.out)).toMatchObject({ imported: 1 });
+    const of = index(e.home).filter((x) => x.nativeSessionIds?.includes('independent'));
+    expect(of).toHaveLength(1);
+    expect(of[0].tags).toEqual({ agent: 'imported' });
   }, T);
 });
 
