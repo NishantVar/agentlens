@@ -13,13 +13,12 @@ import type { NormalizedEvent, RawPair, Runtime, SessionMeta } from './types.js'
 const LENS_VERSION = '0.1.0';
 const SIGNALS = ['SIGHUP', 'SIGTERM', 'SIGINT'] as const;
 type Sig = typeof SIGNALS[number];
-// After a signal, wait this long before forwarding it, so a child that got the
-// same signal from its process group can exit on its own first.
-const FORWARD_SETTLE_MS = 200;
 const graceMs = () => Number(process.env.AGENTLENS_SIGNAL_GRACE_MS) || 3000;
+// A signal is never passed on to the child: closing a pane signals the child
+// directly, and a stop sent only to lens run leaves the child running.
 // Open-file lookups can be slow (ps and lsof each time out at 2 s), so after a
 // signal they never hold the stop past grace + 1 s: the signal look gets until
-// this long after the signal before forwarding, and looks still running at the
+// this long after the signal before the read-ahead, and looks still running at the
 // grace deadline get until grace + 1 s minus the time kept for finalize and
 // exit. A look still running then counts as unreadable evidence: it claims
 // nothing, and stderr says so once.
@@ -154,11 +153,9 @@ export function lensRun(opts: RunOptions): Promise<number> {
       const exited = new Promise<void>((r) => { onChildExit = r; });
       void (async () => {
         // Look while the agent still holds its rollouts, bounded so that a slow
-        // lookup cannot delay the forward or the deadline.
+        // lookup cannot delay the read-ahead or the deadline.
         const look = looker ? looker.look('signal') : Promise.resolve();
-        if (!childExit) await Promise.race([exited, until(t0 + FORWARD_SETTLE_MS)]);
         if (!childExit) await Promise.race([exited, look, until(t0 + SIGNAL_LOOK_CAP_MS)]);
-        if (!childExit && child?.pid) { try { child.kill(s); } catch { /* already gone */ } }
         if (!childExit) prepare(); // while the child has until the deadline
         if (!childExit) await Promise.race([exited, until(deadline)]);
         await finish(childStatus(s), deadline + STOP_LOOK_SLACK_MS);

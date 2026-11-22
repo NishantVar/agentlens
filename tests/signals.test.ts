@@ -34,84 +34,87 @@ describe('save on pane close or process stop', () => {
   let keys: string[];
   beforeAll(async () => { keys = await normalKeys(); }, T);
 
+  const alive = (pidfile: string) => existsSync(pidfile) && (() => { try { process.kill(pidOf(pidfile), 0); return true; } catch { return false; } })();
+  const siglogOf = (f: string) => (existsSync(f) ? readFileSync(f, 'utf8') : '');
+
   for (const S of SIGS) {
-    it(`ALF-1 [${S}] signal to a proxy-mode lens run leaves one normal-shape entry`, async () => {
+    it(`ALF-1 [${S}] signal to a proxy-mode lens run only leaves one normal-shape entry; the signal is not passed on`, async () => {
       const e = claudeEnv();
-      const ready = join(e.sync, 'ready');
-      const r = lensRunFake(e, 'claude', [{ post: true }, { touch: ready }, { wait: join(e.sync, 'never') }], { FAKE_PIDFILE: join(e.sync, 'pid') });
-      cleanup.push(() => { killQuiet(r.child.pid); if (existsSync(join(e.sync, 'pid'))) killQuiet(pidOf(join(e.sync, 'pid'))); });
+      const ready = join(e.sync, 'ready'); const pidfile = join(e.sync, 'pid'); const siglog = join(e.sync, 'siglog');
+      const r = lensRunFake(e, 'claude', [{ post: true }, { touch: ready }, { wait: join(e.sync, 'never') }], { FAKE_PIDFILE: pidfile, FAKE_SIGLOG: siglog });
+      cleanup.push(() => { killQuiet(r.child.pid); if (existsSync(pidfile)) killQuiet(pidOf(pidfile)); });
       await waitFor(() => existsSync(ready), T, 'fake claude ready');
       const sent = Date.now();
       process.kill(r.child.pid!, S);
       const done = await r.done;
-      expect(done.at - sent).toBeLessThan(GRACE);
-      expect(done.code).toBe(status(S)); // the child was signalled
+      expect(done.at - sent).toBeLessThan(GRACE + 1000);
       const entries = index(e.home);
       expect(entries).toHaveLength(1);
       expect(Object.keys(entries[0]).sort()).toEqual(keys);
-      expect(entries[0].exitCode).toBe(status(S));
       expect(entries[0].totals).toMatchObject({ input: 7, output: 3, cacheRead: 11, requests: 1 });
+      expect(siglogOf(siglog)).toBe('');
+      expect(alive(pidfile)).toBe(true); // the child keeps running
     }, T);
 
-    it(`ALF-2 [${S}] signal to a logs-mode lens run includes the held rollout's usage`, async () => {
+    it(`ALF-2 [${S}] signal to a logs-mode lens run only includes the held rollout's usage; the signal is not passed on`, async () => {
       const e = claudeEnv();
       const p = rolloutPath(e, 'sig');
-      const ready = join(e.sync, 'ready');
+      const ready = join(e.sync, 'ready'); const pidfile = join(e.sync, 'pid'); const siglog = join(e.sync, 'siglog');
       const r = lensRunFake(e, 'codex', [
         { open: p }, { write: p, lines: [...metaLines('sig', e.cwd), usageLine({ input: 2000, cached: 500, output: 120 })] },
         { touch: ready }, { wait: join(e.sync, 'never') },
-      ]);
-      cleanup.push(() => killQuiet(r.child.pid));
+      ], { FAKE_PIDFILE: pidfile, FAKE_SIGLOG: siglog });
+      cleanup.push(() => { killQuiet(r.child.pid); if (existsSync(pidfile)) killQuiet(pidOf(pidfile)); });
       await waitFor(() => existsSync(ready), T, 'fake codex ready');
       await new Promise((res) => setTimeout(res, 2000)); // held open for writing at least 2 s
       const sent = Date.now();
       process.kill(r.child.pid!, S);
       const done = await r.done;
-      expect(done.at - sent).toBeLessThan(GRACE);
-      expect(done.code).toBe(status(S));
+      expect(done.at - sent).toBeLessThan(GRACE + 1000);
       const entries = index(e.home);
       expect(entries).toHaveLength(1);
       expect(entries[0].totals).toMatchObject({ input: 1500, cacheRead: 500, output: 120, requests: 1 });
       expect(claims(e.home)).toHaveLength(1);
+      expect(siglogOf(siglog)).toBe('');
+    }, T);
+
+    it(`ALF-3 [group-${S}] signal to the whole process group leaves one entry and the child gets it once`, async () => {
+      const e = claudeEnv();
+      const ready = join(e.sync, 'ready');
+      const siglog = join(e.sync, 'siglog');
+      const r = lensRunFake(e, 'claude', [{ post: true }, { touch: ready }, { wait: join(e.sync, 'never') }], { FAKE_SIGLOG: siglog }, { detached: true });
+      cleanup.push(() => { try { process.kill(-r.child.pid!, 'SIGKILL'); } catch { /* gone */ } });
+      await waitFor(() => existsSync(ready), T, 'fake claude ready');
+      const sent = Date.now();
+      process.kill(-r.child.pid!, S); // as closing a pane does
+      const done = await r.done;
+      expect(done.at - sent).toBeLessThan(GRACE);
+      expect(done.code).toBe(status(S));
+      const entries = index(e.home);
+      expect(entries).toHaveLength(1);
+      expect(Object.keys(entries[0]).sort()).toEqual(keys);
+      expect(readFileSync(siglog, 'utf8')).toBe(`${S}\n`);
+    }, T);
+
+    it(`ALF-4 [ignored-${S}] a child that ignores a group ${S} gets it once and still gets an entry; exit within grace + 1 s`, async () => {
+      const e = claudeEnv();
+      const ready = join(e.sync, 'ready'); const pidfile = join(e.sync, 'pid'); const siglog = join(e.sync, 'siglog');
+      // fetch keeps its connection alive, so a bounded proxy close is exercised.
+      const r = lensRunFake(e, 'claude', [{ post: true }, { touch: ready }, { forever: true }], { FAKE_IGNORE_SIGNALS: '1', FAKE_PIDFILE: pidfile, FAKE_SIGLOG: siglog }, { detached: true });
+      cleanup.push(() => { try { process.kill(-r.child.pid!, 'SIGKILL'); } catch { /* gone */ } if (existsSync(pidfile)) killQuiet(pidOf(pidfile)); });
+      await waitFor(() => existsSync(ready), T, 'fake claude ready');
+      const sent = Date.now();
+      process.kill(-r.child.pid!, S);
+      const done = await r.done;
+      expect(done.at - sent).toBeLessThan(GRACE + 1000);
+      const entries = index(e.home);
+      expect(entries).toHaveLength(1);
+      expect(entries[0].totals).toMatchObject({ input: 7, output: 3, cacheRead: 11, requests: 1 });
+      expect(readFileSync(siglog, 'utf8')).toBe(`${S}\n`);
+      expect(alive(pidfile)).toBe(true);
     }, T);
   }
 
-  it('ALF-3 [group] signal to the whole process group leaves one entry and the child gets it once', async () => {
-    const e = claudeEnv();
-    const ready = join(e.sync, 'ready');
-    const siglog = join(e.sync, 'siglog');
-    const r = lensRunFake(e, 'claude', [{ post: true }, { touch: ready }, { wait: join(e.sync, 'never') }], { FAKE_SIGLOG: siglog }, { detached: true });
-    cleanup.push(() => { try { process.kill(-r.child.pid!, 'SIGKILL'); } catch { /* gone */ } });
-    await waitFor(() => existsSync(ready), T, 'fake claude ready');
-    const sent = Date.now();
-    process.kill(-r.child.pid!, 'SIGHUP'); // as closing a pane does
-    const done = await r.done;
-    expect(done.at - sent).toBeLessThan(GRACE);
-    expect(done.code).toBe(status('SIGHUP'));
-    const entries = index(e.home);
-    expect(entries).toHaveLength(1);
-    expect(Object.keys(entries[0]).sort()).toEqual(keys);
-    expect(readFileSync(siglog, 'utf8')).toBe('SIGHUP\n');
-  }, T);
-
-  it('ALF-4 [ignored] a child that ignores the signal still gets an entry; exit within grace + 1 s', async () => {
-    const e = claudeEnv();
-    const ready = join(e.sync, 'ready');
-    const pidfile = join(e.sync, 'pid');
-    // fetch keeps its connection alive, so a bounded proxy close is exercised.
-    const r = lensRunFake(e, 'claude', [{ post: true }, { touch: ready }, { forever: true }], { FAKE_IGNORE_SIGNALS: '1', FAKE_PIDFILE: pidfile });
-    cleanup.push(() => { killQuiet(r.child.pid); if (existsSync(pidfile)) killQuiet(pidOf(pidfile)); });
-    await waitFor(() => existsSync(ready), T, 'fake claude ready');
-    const sent = Date.now();
-    process.kill(r.child.pid!, 'SIGTERM');
-    const done = await r.done;
-    expect(done.at - sent).toBeLessThan(GRACE + 1000);
-    expect(done.code).toBe(status('SIGTERM'));
-    const entries = index(e.home);
-    expect(entries).toHaveLength(1);
-    expect(entries[0].totals).toMatchObject({ input: 7, output: 3, cacheRead: 11, requests: 1 });
-    expect(existsSync(pidfile) && (() => { try { process.kill(pidOf(pidfile), 0); return true; } catch { return false; } })()).toBe(true);
-  }, T);
   it('ALF-4 [slow-evidence] slow open-file lookups do not stretch a logs-mode stop past grace + 1 s', async () => {
     const e = claudeEnv();
     const slow = join(e.sync, 'lsof');
@@ -217,7 +220,7 @@ describe('save on pane close or process stop', () => {
     await waitFor(() => existsSync(s('ready')) && looks(lk).some((l) => l.claimed.length > 0), T, 'rollout claimed');
     const sent = Date.now();
     process.kill(r.child.pid!, 'SIGTERM');
-    // First read-ahead (after the forward): its temp copy exists, then the rollout
+    // First read-ahead (after the signal look): its temp copy exists, then the rollout
     // becomes unreadable and the read-ahead throws. The second (at the exit look)
     // and finalize then cannot read it either.
     await waitFor(() => readdirSync(e.sync).some((f) => f.startsWith('finalize:after-prepare-temp.') && f.endsWith('.reached')), T, 'read-ahead temp created');
@@ -236,7 +239,7 @@ describe('save on pane close or process stop', () => {
     const grace = 1000;
     const e = claudeEnv({ AGENTLENS_SIGNAL_GRACE_MS: String(grace) });
     const p = rolloutPath(e, 'rmfail'); const s = (n: string) => join(e.sync, n); const lk = s('looks.jsonl');
-    // First read-ahead (after the forward) fails after its temp copy, and removing
+    // First read-ahead (after the signal look) fails after its temp copy, and removing
     // that copy fails once. The second (at the exit look) and finalize succeed.
     const hooks = 'finalize:after-prepare-temp=throw-once,finalize:before-temp-rm=throw-once';
     const r = lensRunFake(e, 'codex', [

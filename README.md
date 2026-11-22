@@ -40,12 +40,16 @@ runs to completion and its exit code is preserved; only the observability data i
 lost, never the run.
 
 If `lens run` is stopped by SIGHUP (a closed pane or terminal), SIGTERM or
-SIGINT, it still saves the session: it takes a last look for Codex rollouts,
-passes the signal on to the agent once if the agent has not already exited,
-waits up to `AGENTLENS_SIGNAL_GRACE_MS` (default 3000) for it, then saves and
-exits with the agent's status (128 + signal number when the agent was killed by
-a signal). A `lens run` that dies without saving (SIGKILL, a crash) is finished
-later by `lens recover`.
+SIGINT, it still saves the session. It never passes the signal on to the
+agent. Closing a pane signals the agent directly; a stop sent only to
+`lens run`, such as `kill <pid>`, does not reach the agent. `lens run` takes
+a last look for Codex rollouts and waits up to `AGENTLENS_SIGNAL_GRACE_MS`
+(default 3000) for the agent to exit. It then saves and exits with the
+agent's status, or 128 + signal number when the agent was killed by a
+signal. If the agent is still running, `lens run` exits with 128 + the
+number of the signal it received. An agent still running then keeps
+running, and usage it adds after that is not recorded. A `lens run` that
+dies without saving (SIGKILL, a crash) is finished later by `lens recover`.
 
 ### `lens import [--runtime claude|codex] [--since <dur>] [--tag k=v ...] [--json]`
 One-shot, idempotent backfill of sessions that were NOT wrapped by `lens run`:
