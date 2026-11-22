@@ -44,6 +44,7 @@ program.command('stats')
   .option('--runtime <rt>', 'claude|codex')
   .option('--json', 'machine-readable output')
   .action(async (opts) => {
+    (await import('./recover.js')).autoSweep();
     const { statsCommand } = await import('./stats.js');
     process.stdout.write(statsCommand(opts) + '\n');
   });
@@ -54,6 +55,7 @@ program.command('sessions')
   .option('--since <dur>', 'e.g. 7d')
   .option('--json', 'machine-readable output')
   .action(async (opts) => {
+    (await import('./recover.js')).autoSweep();
     const { sessionsCommand } = await import('./stats.js');
     process.stdout.write(sessionsCommand(opts) + '\n');
   });
@@ -64,6 +66,7 @@ program.command('report')
   .option('--tag <k=v>', 'include all sessions matching tag (repeatable)', tagOpt, [] as string[])
   .option('--out <path>', 'output file')
   .action(async (sessionIds: string[], opts: { tag: string[]; out?: string }) => {
+    (await import('./recover.js')).autoSweep();
     const { generateReport } = await import('./report.js');
     const { StoreReader } = await import('./store.js');
     const { filterIndex } = await import('./query.js');
@@ -78,6 +81,13 @@ program.command('report')
     const out = opts.out ?? `lens-report-${ids[0]}.html`;
     writeFileSync(out, generateReport(ids, reader));
     console.log(out);
+  });
+
+program.command('recover')
+  .description('Finalize sessions whose `lens run` ended without saving (killed, crashed, pane closed)')
+  .action(async () => {
+    const { sweepStore, sweepLine } = await import('./recover.js');
+    process.stdout.write(sweepLine(sweepStore()) + '\n');
   });
 
 program.command('compact')

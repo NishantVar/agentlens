@@ -419,7 +419,7 @@ function render(data) {
             fmtUsd(e.costUsd),
             fmtDur(e.startedAt, e.endedAt),
             esc(relTime(e.startedAt)),
-            e.exitCode === 0 ? '<span class="dim">ok</span>' : '<span class="bad">exit ' + esc(e.exitCode) + '</span>',
+            e.exitCode === 0 ? '<span class="dim">ok</span>' : e.exitCode === null ? '<span class="dim">unknown</span>' : '<span class="bad">exit ' + esc(e.exitCode) + '</span>',
           ];
         }))
     : '<p class="none">No finished sessions in this window.</p>';

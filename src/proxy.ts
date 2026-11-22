@@ -84,7 +84,13 @@ export function startProxy(opts: ProxyOptions): Promise<CaptureProxy> {
       const { port } = server.address() as AddressInfo;
       resolve({
         origin: `http://127.0.0.1:${port}`,
-        close: () => new Promise<void>((r) => server.close(() => r())),
+        // Bounded: a child that outlived the signal grace may still hold
+        // keep-alive sockets, and an unbounded close would hang the wrapper.
+        close: () => new Promise<void>((r) => {
+          const t = setTimeout(r, 1000); t.unref();
+          server.close(() => { clearTimeout(t); r(); });
+          server.closeAllConnections();
+        }),
       });
     });
   });

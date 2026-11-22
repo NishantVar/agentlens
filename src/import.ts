@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { SessionWriter, StoreReader, newSessionId, storeRoot } from './store.js';
 import { claudeProjectsRoot, extractClaudeSessionIdFromRawBody, findClaudeTranscripts, parseClaudeTranscript } from './claudeTranscript.js';
 import { listCodexRollouts, rolloutNativeSessionId } from './codexRollout.js';
+import { hasClaim } from './claims.js';
 import { parseSince } from './query.js';
 import { resolveTags } from './tags.js';
 import type { NormalizedEvent, Runtime } from './types.js';
@@ -90,6 +91,8 @@ export function runImport(opts: ImportOptions): ImportSummary {
   if (opts.runtime !== 'claude') {
     for (const r of listCodexRollouts()) {
       try {
+        // A claimed rollout belongs to a `lens run` session, finalized or not.
+        if (hasClaim(root, r.rolloutPath)) { sum.skippedExisting++; continue; }
         consider('codex', r.rolloutPath, 'rollout-1.jsonl', r);
       } catch (e) {
         sum.errors++;

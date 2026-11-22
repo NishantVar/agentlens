@@ -39,6 +39,14 @@ Capture is **fail-open**: if the proxy or log collection fails, the agent still
 runs to completion and its exit code is preserved; only the observability data is
 lost, never the run.
 
+If `lens run` is stopped by SIGHUP (a closed pane or terminal), SIGTERM or
+SIGINT, it still saves the session: it takes a last look for Codex rollouts,
+passes the signal on to the agent once if the agent has not already exited,
+waits up to `AGENTLENS_SIGNAL_GRACE_MS` (default 3000) for it, then saves and
+exits with the agent's status (128 + signal number when the agent was killed by
+a signal). A `lens run` that dies without saving (SIGKILL, a crash) is finished
+later by `lens recover`.
+
 ### `lens import [--runtime claude|codex] [--since <dur>] [--tag k=v ...] [--json]`
 One-shot, idempotent backfill of sessions that were NOT wrapped by `lens run`:
 claude's native transcripts (`~/.claude/projects/**/*.jsonl`, override with
@@ -65,13 +73,26 @@ has no known price are excluded from cost and flagged in a footnote.
 ### `lens sessions [--tag k=v ...] [--since <dur>] [--json]`
 Lists captured sessions (newest first) with id, start time, runtime, tags,
 request count, total tokens, and exit code. Same `--tag` / `--since` filters as
-`stats`. `--json` emits the raw index entries.
+`stats`. `--json` emits the raw index entries. A recovered session shows its
+exit code as `unknown` (`null` in `--json`), because no one saw the agent exit.
 
 ### `lens report [sessionIds...] [--tag k=v ...] [--out <path>]`
 Generates a single self-contained HTML file with the full conversation and raw
 request/response bodies for the selected sessions. Select sessions by explicit
 ids or by `--tag` (all matching sessions). `--out` sets the output path (defaults
 to `lens-report-<id>.html`). Open the file in any browser — no server needed.
+
+### `lens recover`
+Saves sessions whose `lens run` ended without saving (killed, crashed). A
+session is recovered only once its `lens run` and every process that held one
+of its Codex rollouts open are gone, matched by pid and process start time so a
+reused pid does not count. Sessions from before agentlens recorded that identity
+are recovered once nothing in their folder has changed for an hour. A recovered
+entry carries `"recovered": true` and `"exitCode": null`. It prints one summary
+line and is safe to re-run. `lens stats`, `lens sessions`, `lens report` and the
+dashboard's `/api/data` run the same sweep first, so a recovered session is
+counted without running `recover` by hand; `lens run`, `import` and `compact`
+never do.
 
 ### `lens compact`
 Shrinks the store in place. Agent request bodies repeat the full tool list,
@@ -112,8 +133,11 @@ All sessions land in one global store, independent of the directory you run from
 ~/.agent-obs/                 (override with AGENTLENS_HOME)
 ├── index.jsonl               one line per finalized session (the query index; carries nativeSessionIds for import dedup)
 ├── pricing.json              optional pricing overrides (see below)
+├── claims/<sha256>.json      which session owns each Codex rollout (one file per rollout, never two owners)
 └── sessions/<id>/
-    ├── meta.json             runtime, capture mode, tags, cwd, argv, timing
+    ├── meta.json             runtime, capture mode, tags, cwd, argv, timing, `lens run` pid + start time
+    ├── final.<n>.json        finalize ticket: only one process saves a session
+    ├── holders.jsonl         extra processes seen writing this session's rollouts (checked before recovery)
     ├── events.jsonl          normalized per-call token usage
     ├── raw.jsonl             full request/response pairs (proxy mode); repeated request content is refs into blobs.jsonl
     ├── blobs.jsonl           each distinct tools/system/message value, stored once
@@ -160,8 +184,15 @@ CLIs expose their model traffic very differently:
   REST calls). A capture proxy therefore cannot see the completion — see
   `spikes/FINDINGS.md` for the definitive investigation. Instead, agentlens reads
   codex's own native session rollout logs (`~/.codex/sessions/**/rollout-*.jsonl`)
-  after the run, filtered to rollouts written during the run window and matching
-  the run's cwd, and extracts token counts from their `token_count` events.
+  and extracts token counts from their `token_count` events. A rollout belongs
+  to a session only if a process started by that `lens run` was seen holding it
+  open for writing. `lens run` looks at child start, about once a second, on a
+  signal and at exit, and the first session to see a rollout claims it, so each
+  rollout counts for at most one session. A rollout no look saw open is not
+  counted; it is named on stderr after the run. Start time and folder only
+  narrow which rollouts are named, never which are counted. Open-file evidence
+  comes from `lsof` (override with `AGENTLENS_LSOF`); if it cannot be read,
+  stderr says so and no rollout is counted.
 
 ### Adding a runtime
 
