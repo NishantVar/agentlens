@@ -1,7 +1,7 @@
 // Recovery sweep: finalize sessions whose `lens run` died without saving.
 // Runs from `lens recover`, `stats`, `sessions`, `report` and the dashboard's
 // /api/data; never from `run`, `import` or `compact`. Fail-open throughout.
-import { existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { claimsOf, listClaims, nameUnclaimed, readHolders, type ClaimRecord } from './claims.js';
 import { finalizeSession, indexedIds } from './finalize.js';
@@ -19,10 +19,6 @@ function newestMtime(dir: string): number {
   let t = statSync(dir).mtimeMs;
   for (const f of readdirSync(dir)) t = Math.max(t, statSync(join(dir, f)).mtimeMs);
   return t;
-}
-
-function hasEvents(dir: string): boolean {
-  try { return readFileSync(join(dir, 'events.jsonl'), 'utf8').trim().length > 0; } catch { return false; }
 }
 
 export function sweepStore(root: string = storeRoot(), o: SweepOpts = {}): SweepSummary {
@@ -60,14 +56,6 @@ export function sweepStore(root: string = storeRoot(), o: SweepOpts = {}): Sweep
           // An import interrupted after its claim: count the claimed rollout in
           // full, as import would have, so the claim does not strand its usage.
           if (eligible && meta.source?.kind === 'import' && meta.capture === 'logs') mine = claimsOf(listClaims(root), id);
-          // An import interrupted before its claim left only metadata: it never
-          // counted anything, so it is removed rather than indexed as empty.
-          if (eligible && meta.source?.kind === 'import' && !mine.length && !hasEvents(dir)) {
-            rmSync(dir, { recursive: true, force: true });
-            log(`agentlens: import session ${id} was interrupted before it counted anything; removed it, run \`lens import\` again to count its rollout`);
-            sum.skipped++;
-            continue;
-          }
         }
         if (!eligible) { sum.skipped++; continue; }
         hook('recover:after-gate');
