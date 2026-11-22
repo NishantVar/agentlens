@@ -4,7 +4,7 @@ import { SessionWriter, StoreReader, newSessionId, storeRoot } from './store.js'
 import { claudeProjectsRoot, extractClaudeSessionIdFromRawBody, findClaudeTranscripts, parseClaudeTranscript } from './claudeTranscript.js';
 import { listCodexRollouts, rolloutNativeSessionId } from './codexRollout.js';
 import { codexSessionsRoot, hasClaim, readTree, tryClaim, writersOf } from './claims.js';
-import { descendantsIn, liveness, procTable } from './procinfo.js';
+import { descendantsIn, liveness, procTable, type ProcIdentity } from './procinfo.js';
 import { parseSince } from './query.js';
 import { hook } from './testHooks.js';
 import { resolveTags } from './tags.js';
@@ -69,7 +69,9 @@ async function wrappedLiveRollouts(reader: StoreReader, root: string): Promise<S
   const roots = new Set<number>();
   for (const m of wrappers) {
     roots.add(m.wrapper!.pid);
-    for (const t of readTree(root, m.id)) if (t.startTime !== null && table.start.get(t.pid) === t.startTime) roots.add(t.pid);
+    let tree: ProcIdentity[];
+    try { tree = readTree(root, m.id); } catch (e) { return unreadable(`remembered process tree of session ${m.id}: ${(e as Error).message}`); }
+    for (const t of tree) if (t.startTime !== null && table.start.get(t.pid) === t.startTime) roots.add(t.pid);
   }
   const pids = [...roots, ...descendantsIn(table, [...roots])];
   const ev = await writersOf(pids, rootReal);

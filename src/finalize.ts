@@ -181,7 +181,11 @@ export function finalizeSession(root: string, id: string, o: FinalizeOpts): Inde
         const text = readFileSync(copy, 'utf8');
         got = { scan: scanRollout(text), commit: () => {} };
       }
-      if (got.scan.nativeId && counted.has(got.scan.nativeId)) { log(`agentlens: rollout already counted by an earlier session, not counted again: ${c.rollout}`); continue; }
+      if (got.scan.nativeId && counted.has(got.scan.nativeId)) {
+        if (p && o.prepared) o.prepared.stale.add(p.tmp); // its prepared copy goes at the cleanup below
+        log(`agentlens: rollout already counted by an earlier session, not counted again: ${c.rollout}`);
+        continue;
+      }
       for (const ev of got.scan.events) events.push({ ...ev, seq: events.length + 1 });
       if (got.scan.nativeId) nativeIds.add(got.scan.nativeId);
       got.commit(copy);

@@ -53,6 +53,9 @@ export function sweepStore(root: string = storeRoot(), o: SweepOpts = {}): Sweep
           }
         } else {
           eligible = now - newestMtime(dir) >= LEGACY_IDLE_MS; // legacy: no identity recorded
+          // An import interrupted after its claim: count the claimed rollout in
+          // full, as import would have, so the claim does not strand its usage.
+          if (eligible && meta.source?.kind === 'import' && meta.capture === 'logs') mine = claimsOf(listClaims(root), id);
         }
         if (!eligible) { sum.skipped++; continue; }
         hook('recover:after-gate');
