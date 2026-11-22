@@ -48,7 +48,10 @@ a last look for Codex rollouts and waits up to `AGENTLENS_SIGNAL_GRACE_MS`
 agent's status, or 128 + signal number when the agent was killed by a
 signal. If the agent is still running, `lens run` exits with 128 + the
 number of the signal it received. An agent still running then keeps
-running, and usage it adds after that is not recorded. A `lens run` that
+running, and usage it adds after that is not recorded. A Claude agent sends
+its model requests through `lens run`'s proxy, so after a stop sent only to
+`lens run` it keeps running but cannot reach the model, and has to be
+restarted. A `lens run` that
 dies without saving (SIGKILL, a crash) is finished later by `lens recover`.
 
 ### `lens import [--runtime claude|codex] [--since <dur>] [--tag k=v ...] [--json]`
